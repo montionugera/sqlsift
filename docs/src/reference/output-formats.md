@@ -1,6 +1,6 @@
 # Output formats
 
-Choose a format with `--format` (`-f`) or `format` in `sqlsift.toml`. The machine-readable formats (`json`, `sarif`, `github`) write diagnostics to stdout and logs and the summary line to stderr, so stdout can be piped or redirected to a file. `human` output goes to stderr.
+Choose a format with `--format` (`-f`) or `format` in `sqlsift.toml`. The machine-readable formats (`json`, `sarif`, `github`) write diagnostics to stdout and logs and the summary line to stderr, so stdout can be piped or redirected to a file. `human` output goes to stderr. Baseline summaries (the "*N* known diagnostic(s) hidden" and "no longer occur" notes) go to stderr only; they are not included in `--format json` or `sarif`.
 
 ## `human` (default)
 
