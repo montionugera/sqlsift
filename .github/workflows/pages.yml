@@ -47,15 +47,7 @@ jobs:
           toolchain: stable
           targets: wasm32-unknown-unknown
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install wasm-bindgen-cli
         uses: taiki-e/install-action@v2
