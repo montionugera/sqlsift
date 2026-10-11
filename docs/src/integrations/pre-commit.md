@@ -14,9 +14,11 @@ set -euo pipefail
 status=0
 while IFS= read -r file; do
   git show ":$file" | sqlsift check --stdin-filename "$file" - || status=1
-done < <(git diff --cached --name-only --diff-filter=ACM -- '*.sql')
+done < <(git diff --cached --name-only --diff-filter=ACM -- '*.sql' '*.ts' '*.tsx' '*.js' '*.jsx' '*.mts' '*.cts')
 exit $status
 ```
+
+sqlsift determines from the file extension whether it is raw SQL or embedded SQL, so the command inside the loop does not change. Only include the TypeScript and JavaScript extensions if your project has [SQL in tagged templates](../guide/queries.md#sql-in-typescript-and-javascript) (otherwise every TS commit runs the hook for nothing).
 
 This uses the schema settings from `sqlsift.toml`. When a schema or migration file is staged, consider checking every query (`sqlsift check`) instead, since any of them may be affected.
 
@@ -33,7 +35,7 @@ repos:
         name: sqlsift
         entry: npx --yes sqlsift-cli check
         language: system
-        files: \.sql$
+        files: \.(sql|ts|tsx|js|jsx|mts|cts)$
         pass_filenames: false
 ```
 
