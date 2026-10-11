@@ -32,6 +32,10 @@ This creates a git tag and pushes it, triggering the cargo-dist release workflow
 
 ## Prerequisites
 
+### For release-plz (Automated Release)
+- `RELEASE_PLZ_TOKEN`: A Personal Access Token (PAT) with repo write permissions (`contents: write`, `pull-requests: write`) set in repository secrets.
+- **PAT Expiry Reminder**: GitHub PATs expire periodically. Keep track of the token expiry date so it can be renewed proactively before automated release runs fail.
+
 ### For npm
 - Configure [OIDC trusted publishing](https://docs.npmjs.com/generating-provenance-statements#publishing-packages-with-provenance-via-github-actions) on npmjs.com for the `sqlsift-cli` package
   - Repository owner: `yukikotani231`, Repository: `sqlsift`, Workflow: `release.yml`
@@ -104,6 +108,9 @@ are the same.
 - Major (x.0.0): Breaking changes
 
 ## Troubleshooting
+
+### release-plz fails with "could not read Username"
+- The `RELEASE_PLZ_TOKEN` secret has expired. Generate a new fine-grained or classic PAT with repository `contents: write` and `pull-requests: write` permissions, and update `RELEASE_PLZ_TOKEN` in repository secrets (Settings > Secrets and variables > Actions).
 
 ### "crate not found" error when publishing CLI
 - Wait a few minutes for crates.io index to update after publishing core
