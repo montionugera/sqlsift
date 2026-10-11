@@ -524,9 +524,9 @@ impl<'a> Analyzer<'a> {
                 statements.extend(parsed.into_iter().map(|s| (s, origin)));
                 continue;
             }
-            // PostgreSQL's `ANALYZE [VERBOSE] [table]` (sqlparser wants `ANALYZE TABLE`):
-            // statistics only, nothing to check
-            if self.dialect.is_psql() && first_word_is(dialect.as_ref(), text, "ANALYZE") {
+            // PostgreSQL maintenance and procedural statements (ANALYZE, VACUUM, REFRESH MATERIALIZED VIEW, DO):
+            // statistics or procedural blocks only, nothing to check
+            if self.dialect.is_psql() && is_skipped_statement(dialect.as_ref(), text) {
                 continue;
             }
             // `CREATE EXTENSION ... VERSION '...'` (Supabase/pgTAP test files): loads
@@ -578,6 +578,15 @@ fn significant_tokens(dialect: &dyn Dialect, text: &str) -> Option<Vec<(Token, R
             })
             .collect(),
     )
+}
+
+/// Whether an unparseable PostgreSQL statement is a maintenance or procedural command
+/// that has no relations or schema elements to check (ANALYZE, VACUUM, REFRESH MATERIALIZED VIEW, DO)
+fn is_skipped_statement(dialect: &dyn Dialect, text: &str) -> bool {
+    first_word_is(dialect, text, "ANALYZE")
+        || first_word_is(dialect, text, "VACUUM")
+        || first_word_is(dialect, text, "DO")
+        || starts_with_words(dialect, text, &["REFRESH", "MATERIALIZED", "VIEW"])
 }
 
 /// Whether the first word of `text` (after comments) is the keyword `keyword`

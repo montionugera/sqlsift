@@ -1588,3 +1588,49 @@ fn search_path_in_schema_files_applies_to_that_file() {
         ["open", "paid"]
     );
 }
+
+#[test]
+fn maintenance_and_procedural_statements_skipped_without_diagnostics() {
+    let catalog = catalog();
+    let sql = r"
+        -- leading comment
+        ANALYZE events;
+        vacuum analyze events;
+        REFRESH MATERIALIZED VIEW mv;
+        refresh materialized view concurrently mv;
+        /* procedural block */
+        DO $$ BEGIN RAISE NOTICE 'hi'; END $$;
+        do $$ begin null; end $$;
+        SELECT bogus FROM events;
+    ";
+
+    let diagnostics = analyze(&catalog, sql);
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "unexpected diagnostics: {diagnostics:#?}"
+    );
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::ColumnNotFound);
+    assert!(
+        diagnostics[0].message.contains("'bogus'"),
+        "unexpected message: {}",
+        diagnostics[0].message
+    );
+}
+
+#[test]
+fn syntax_errors_in_other_statements_still_reported() {
+    let catalog = catalog();
+    let sql = r"
+        VACUUM events;
+        SELECT FROM WHERE;
+    ";
+
+    let diagnostics = analyze(&catalog, sql);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::ParseError),
+        "expected parse error, got: {diagnostics:#?}"
+    );
+}
