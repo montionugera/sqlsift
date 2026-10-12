@@ -194,4 +194,30 @@ impl Resolver<'_> {
         diag.span = super::type_check::located_span(expr);
         self.diagnostics.push(diag);
     }
+
+    /// Report `ceil(...)` or `floor(...)` called with an argument type it doesn't accept
+    pub(super) fn check_ceil_floor(&mut self, name: &str, expr: &Expr) {
+        if self.dialect != SqlDialect::PostgreSQL {
+            return;
+        }
+        if self.catalog.user_functions.iter().any(|f| f == name) {
+            return;
+        }
+        let ExpressionType::Known(ty) = self.infer_expr_type(expr) else {
+            return;
+        };
+        if !is_non_numeric(&ty) {
+            return;
+        }
+        let type_name = ty.display_name();
+        let mut diag = Diagnostic::error(
+            DiagnosticKind::WrongArgumentType,
+            format!("Function {name}({type_name}) does not exist: {name}() takes a number"),
+        )
+        .with_help(format!(
+            "Cast the argument to numeric: {name}({expr}::numeric)"
+        ));
+        diag.span = super::type_check::located_span(expr);
+        self.diagnostics.push(diag);
+    }
 }

@@ -629,6 +629,12 @@ impl Resolver<'_> {
                 ExpressionType::of_column(&SqlType::from_ast_in(data_type, self.dialect))
             }
             Expr::Function(func) => self.infer_function_return_type(func),
+            Expr::Ceil { expr: inner, .. } | Expr::Floor { expr: inner, .. } => {
+                match self.infer_expr_type(inner) {
+                    ExpressionType::Known(ty) if ty.is_numeric() => ExpressionType::Known(ty),
+                    _ => ExpressionType::Unknown,
+                }
+            }
             Expr::Interval(_) => ExpressionType::Known(SqlType::Interval),
             Expr::Case {
                 conditions,
