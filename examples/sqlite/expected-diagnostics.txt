@@ -1,0 +1,6 @@
+# Diagnostics `sqlsift check broken/...` must report (checked in CI by
+# scripts/check-examples.sh): <file>:<line>:<column> <code>
+broken/bad_queries.sql:3:6 E0001
+broken/bad_queries.sql:7:16 E0002
+broken/bad_queries.sql:14:19 E0002
+broken/bad_queries.sql:19:14 E0014

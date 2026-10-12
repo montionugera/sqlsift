@@ -13,6 +13,7 @@ The repository's [`examples/`](https://github.com/yukikotani231/sqlsift/tree/mai
 | [sqlx](https://github.com/yukikotani231/sqlsift/tree/main/examples/sqlx) | sqlx `query_file!` / `query_file_as!`, inline `query_as!` / `sqlx::query_scalar` + `migrate!()` | `schema_dir = "migrations"`, `files = ["queries/**/*.sql", "src/**/*.rs"]` |
 | [postgres-migrations](https://github.com/yukikotani231/sqlsift/tree/main/examples/postgres-migrations) | Plain SQL + migrations, PostgreSQL | `schema_dir = "migrations"`, `files = ["queries/**/*.sql"]` |
 | [mysql](https://github.com/yukikotani231/sqlsift/tree/main/examples/mysql) | Flyway-style migrations, MySQL | `schema_dir = "migrations"`, `files = ["queries/**/*.sql"]`, `dialect = "mysql"` |
+| [sqlite](https://github.com/yukikotani231/sqlsift/tree/main/examples/sqlite) | Plain SQL + schema, SQLite | `schema = ["schema.sql"]`, `files = ["queries/**/*.sql"]`, `dialect = "sqlite"` |
 | [dbt-postgres](https://github.com/yukikotani231/sqlsift/tree/main/examples/dbt-postgres) | dbt on PostgreSQL | `schema = ["warehouse/raw.sql"]`, `files = ["models/**/*.sql"]` |
 
 ## A migration that breaks a query

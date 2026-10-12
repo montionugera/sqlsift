@@ -13,6 +13,7 @@ Small, realistic projects showing how to set up sqlsift for common stacks. Each 
 | [`sqlx`](sqlx) | sqlx `query_file!` + `migrate!()`, PostgreSQL | `queries/*.sql` with one statement each, `<timestamp>_name.sql` migrations, a dropped column caught without a database |
 | [`postgres-migrations`](postgres-migrations) | Plain SQL + migrations, PostgreSQL | **A migration renames a column; the query still using the old name is caught** |
 | [`mysql`](mysql) | Flyway-style migrations, MySQL | `?` placeholders, inline `ENUM`, `ON DUPLICATE KEY UPDATE` |
+| [`sqlite`](sqlite) | Plain SQL + schema, SQLite | `INTEGER PRIMARY KEY`, booleans as integers (`WHERE active = 1`), `INSERT OR REPLACE` / `ON CONFLICT ... DO UPDATE`, `strftime()` |
 | [`dbt-postgres`](dbt-postgres) | dbt on PostgreSQL | Jinja masking, `{{ source() }}` columns, incremental models |
 
 In each directory:
