@@ -124,6 +124,54 @@ fn other_dialects_convert_implicitly() {
 }
 
 #[test]
+fn multi_argument_text_functions_reported() {
+    for sql in [
+        "SELECT lpad(id, 8, '0') FROM s",
+        "SELECT rpad(id, 8, '0') FROM s",
+        "SELECT left(d, 4) FROM s",
+        "SELECT right(d, 4) FROM s",
+        "SELECT replace(id, '1', '2') FROM s",
+        "SELECT split_part(id, ',', 1) FROM s",
+        "SELECT strpos(id, '1') FROM s",
+        "SELECT starts_with(id, '1') FROM s",
+        "SELECT repeat(id, 3) FROM s",
+        "SELECT translate(id, '1', '2') FROM s",
+    ] {
+        assert_eq!(codes(sql), ["E0027"], "{sql}");
+    }
+}
+
+#[test]
+fn multi_argument_text_functions_not_reported() {
+    for sql in [
+        "SELECT lpad(name, 8, '0') FROM s",
+        "SELECT rpad(name, 8, '0') FROM s",
+        "SELECT left(name, 3) FROM s",
+        "SELECT right(name, 3) FROM s",
+        "SELECT split_part(name, ',', 1) FROM s",
+        "SELECT strpos(name, 'a') FROM s",
+        "SELECT starts_with(name, 'a') FROM s",
+        "SELECT replace(name, '1', '2') FROM s",
+        "SELECT repeat(name, 2) FROM s",
+        "SELECT translate(name, '1', '2') FROM s",
+        "SELECT lpad(id::text, 8, '0') FROM s",
+        "SELECT left(name, 3) FROM s",
+        "SELECT lpad(name, id) FROM s",
+    ] {
+        assert!(codes(sql).is_empty(), "{sql}: {:?}", codes(sql));
+    }
+
+    for dialect in [SqlDialect::MySQL, SqlDialect::SQLite] {
+        assert!(codes_with(
+            SCHEMA,
+            dialect,
+            "SELECT lpad(id, 8, '0'), left(d, 4), replace(id, '1', '2') FROM s"
+        )
+        .is_empty());
+    }
+}
+
+#[test]
 fn numeric_functions_of_non_numbers() {
     for sql in [
         "SELECT round(name) FROM s",
@@ -171,6 +219,35 @@ fn numeric_functions_matching_signatures_pass() {
         )
         .is_empty());
     }
+}
+
+#[test]
+fn text_functions_parenthesize_complex_expression_in_cast_help() {
+    let mut builder = SchemaBuilder::with_dialect(SqlDialect::PostgreSQL);
+    builder.parse(SCHEMA).expect("schema parses");
+    let catalog = builder.build().0;
+    let analyze = |sql| Analyzer::with_dialect(&catalog, SqlDialect::PostgreSQL).analyze(sql);
+
+    let diags = analyze("SELECT lpad(id + 1, 8, '0') FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("Cast the argument to text: lpad((id + 1)::text, 8, '0')")
+    );
+
+    let diags = analyze("SELECT lower(id + 1) FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("Cast the argument to text: lower((id + 1)::text)")
+    );
+
+    let diags = analyze("SELECT lpad(id, 8, '0') FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("Cast the argument to text: lpad(id::text, 8, '0')")
+    );
 }
 
 #[test]

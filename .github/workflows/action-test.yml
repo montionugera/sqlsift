@@ -30,6 +30,8 @@ jobs:
         with:
           toolchain: stable
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Build sqlsift
         run: cargo build -p sqlsift-cli
 

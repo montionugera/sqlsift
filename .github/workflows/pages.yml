@@ -47,15 +47,7 @@ jobs:
           toolchain: stable
           targets: wasm32-unknown-unknown
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install wasm-bindgen-cli
         uses: taiki-e/install-action@v2
@@ -72,6 +64,10 @@ jobs:
 
       - name: Build user guide
         run: mdbook build docs --dest-dir "$GITHUB_WORKSPACE/site/docs"
+
+      # The playground's wasm includes the crates listed there
+      - name: Copy third-party licenses
+        run: cp THIRD-PARTY-LICENSES.md LICENSE site/
 
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request'

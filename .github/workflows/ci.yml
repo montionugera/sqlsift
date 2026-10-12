@@ -39,16 +39,7 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
+      - uses: Swatinem/rust-cache@v2
 
       - name: Build
         run: cargo build --all-targets
@@ -72,11 +63,42 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+  licenses:
+    name: Licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Dependency licenses must be in the allow list of deny.toml
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+
+      - name: Install cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.8.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+
+      # The notices shipped with the binaries and the VS Code extension must match
+      # the dependencies; run scripts/third-party-licenses.sh after changing them.
+      - name: Check third-party notices are up to date
+        run: |
+          cargo fetch --locked
+          (cd editors/vscode && npm ci --ignore-scripts)
+          scripts/third-party-licenses.sh
+          git diff --exit-code -- THIRD-PARTY-LICENSES.md editors/vscode/THIRD-PARTY-NOTICES.md
 
   examples:
     name: Example projects
@@ -89,15 +111,7 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-examples-${{ hashFiles('**/Cargo.lock') }}
+      - uses: Swatinem/rust-cache@v2
 
       - name: Build sqlsift
         run: cargo build -p sqlsift-cli
@@ -117,6 +131,8 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Build documentation
         run: cargo doc --no-deps

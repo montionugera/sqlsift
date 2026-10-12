@@ -35,7 +35,10 @@ fn builtin(name: &str) -> Option<Accepts> {
         "abs" | "ceil" | "ceiling" | "floor" | "round" | "trunc" | "sign" | "sqrt" | "cbrt"
         | "exp" | "ln" => Accepts::Number,
         "lower" | "upper" | "initcap" | "length" | "char_length" | "character_length" | "ltrim"
-        | "rtrim" | "btrim" | "reverse" | "md5" => Accepts::Text,
+        | "rtrim" | "btrim" | "reverse" | "md5" | "lpad" | "rpad" | "left" | "right"
+        | "split_part" | "strpos" | "starts_with" | "replace" | "repeat" | "translate" => {
+            Accepts::Text
+        }
         _ => return None,
     })
 }
@@ -132,16 +135,20 @@ impl Resolver<'_> {
                 "numbers or intervals",
                 format!("{name}() needs a number: cast the argument or use another aggregate"),
             ),
-            Accepts::Number => {
+            Accepts::Number | Accepts::Text => {
+                let (takes, target_cast, target_desc) = match accepts {
+                    Accepts::Number => ("a number", "::numeric", "numeric"),
+                    _ => ("text", "::text", "text"),
+                };
                 let mut suggested: Vec<String> = Vec::with_capacity(list.args.len());
                 for (i, a) in list.args.iter().enumerate() {
                     match a {
                         FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => {
                             if i == 0 {
                                 if needs_parens_for_cast(e) {
-                                    suggested.push(format!("({e})::numeric"));
+                                    suggested.push(format!("({e}){target_cast}"));
                                 } else {
-                                    suggested.push(format!("{e}::numeric"));
+                                    suggested.push(format!("{e}{target_cast}"));
                                 }
                             } else {
                                 suggested.push(format!("{e}"));
@@ -151,17 +158,13 @@ impl Resolver<'_> {
                     }
                 }
                 (
-                    "a number",
+                    takes,
                     format!(
-                        "Cast the argument to numeric: {name}({})",
+                        "Cast the argument to {target_desc}: {name}({})",
                         suggested.join(", ")
                     ),
                 )
             }
-            Accepts::Text => (
-                "text",
-                format!("Cast the argument to text: {name}(x::text)"),
-            ),
         };
         let arg_types: Vec<String> = list
             .args
