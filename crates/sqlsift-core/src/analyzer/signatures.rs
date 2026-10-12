@@ -151,7 +151,7 @@ impl Resolver<'_> {
             .iter()
             .map(|a| match a {
                 FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => match self.infer_expr_type(e) {
-                    ExpressionType::Known(t) => t.display_name().to_string(),
+                    ExpressionType::Known(t) => t.display_name(),
                     _ => "unknown".to_string(),
                 },
                 _ => "unknown".to_string(),
