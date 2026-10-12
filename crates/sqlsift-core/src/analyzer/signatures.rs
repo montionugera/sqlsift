@@ -139,7 +139,10 @@ impl Resolver<'_> {
                 }
                 (
                     "text",
-                    format!("Cast the argument to text: {name}({})", suggested.join(", ")),
+                    format!(
+                        "Cast the argument to text: {name}({})",
+                        suggested.join(", ")
+                    ),
                 )
             }
         };
