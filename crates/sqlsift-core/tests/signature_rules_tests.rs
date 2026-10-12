@@ -172,3 +172,32 @@ fn numeric_functions_matching_signatures_pass() {
         .is_empty());
     }
 }
+
+#[test]
+fn numeric_functions_parenthesize_complex_expression_in_cast_help() {
+    let mut builder = SchemaBuilder::with_dialect(SqlDialect::PostgreSQL);
+    builder.parse(SCHEMA).expect("schema parses");
+    let catalog = builder.build().0;
+    let analyze = |sql| Analyzer::with_dialect(&catalog, SqlDialect::PostgreSQL).analyze(sql);
+
+    let diags = analyze("SELECT round(d + 1, 2) FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("Cast the argument to numeric: round((d + 1)::numeric, 2)")
+    );
+
+    let diags = analyze("SELECT abs(d + 1) FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("Cast the argument to numeric: abs((d + 1)::numeric)")
+    );
+
+    let diags = analyze("SELECT floor(d + 1) FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("Cast the argument to numeric: floor((d + 1)::numeric)")
+    );
+}

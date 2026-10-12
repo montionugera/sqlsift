@@ -73,6 +73,14 @@ fn is_non_numeric(ty: &SqlType) -> bool {
     )
 }
 
+/// Whether an expression needs parentheses before appending a cast `::type`
+fn needs_parens_for_cast(expr: &Expr) -> bool {
+    !matches!(
+        expr,
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_) | Expr::Nested(_)
+    )
+}
+
 impl Resolver<'_> {
     /// Report a built-in function called with an argument type it doesn't accept
     pub(super) fn check_function_signature(&mut self, func: &Function) {
@@ -130,7 +138,11 @@ impl Resolver<'_> {
                     match a {
                         FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => {
                             if i == 0 {
-                                suggested.push(format!("{e}::numeric"));
+                                if needs_parens_for_cast(e) {
+                                    suggested.push(format!("({e})::numeric"));
+                                } else {
+                                    suggested.push(format!("{e}::numeric"));
+                                }
                             } else {
                                 suggested.push(format!("{e}"));
                             }
@@ -210,13 +222,16 @@ impl Resolver<'_> {
             return;
         }
         let type_name = ty.display_name();
+        let help_cast = if needs_parens_for_cast(expr) {
+            format!("Cast the argument to numeric: {name}(({expr})::numeric)")
+        } else {
+            format!("Cast the argument to numeric: {name}({expr}::numeric)")
+        };
         let mut diag = Diagnostic::error(
             DiagnosticKind::WrongArgumentType,
             format!("Function {name}({type_name}) does not exist: {name}() takes a number"),
         )
-        .with_help(format!(
-            "Cast the argument to numeric: {name}({expr}::numeric)"
-        ));
+        .with_help(help_cast);
         diag.span = super::type_check::located_span(expr);
         self.diagnostics.push(diag);
     }
