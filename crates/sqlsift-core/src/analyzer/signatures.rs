@@ -23,6 +23,8 @@ use super::scope::ExpressionType;
 enum Accepts {
     /// Numbers and intervals (`sum`, `avg`)
     NumberOrInterval,
+    /// Numbers only (`abs`, `ceil`, `round`, ...)
+    Number,
     /// Character strings (and `bytea` for `length` / `md5`)
     Text,
 }
@@ -30,6 +32,8 @@ enum Accepts {
 fn builtin(name: &str) -> Option<Accepts> {
     Some(match name {
         "sum" | "avg" => Accepts::NumberOrInterval,
+        "abs" | "ceil" | "ceiling" | "floor" | "round" | "trunc" | "sign" | "sqrt" | "cbrt"
+        | "exp" | "ln" => Accepts::Number,
         "lower" | "upper" | "initcap" | "length" | "char_length" | "character_length" | "ltrim"
         | "rtrim" | "btrim" | "reverse" | "md5" => Accepts::Text,
         _ => return None,
@@ -95,33 +99,73 @@ impl Resolver<'_> {
         let FunctionArguments::List(list) = &func.args else {
             return;
         };
-        let [FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))] = list.args.as_slice() else {
+        let Some(first_arg) = list.args.first() else {
             return;
         };
+        let FunctionArg::Unnamed(FunctionArgExpr::Expr(arg)) = first_arg else {
+            return;
+        };
+        // For NumberOrInterval (aggregates sum/avg), only 1-argument calls are checked
+        if matches!(accepts, Accepts::NumberOrInterval) && list.args.len() != 1 {
+            return;
+        }
         let ExpressionType::Known(ty) = self.infer_expr_type(arg) else {
             return;
         };
         let wrong = match accepts {
-            Accepts::NumberOrInterval => is_non_numeric(&ty),
+            Accepts::NumberOrInterval | Accepts::Number => is_non_numeric(&ty),
             Accepts::Text => is_non_text(&ty),
         };
         if !wrong {
             return;
         }
-        let type_name = ty.display_name();
         let (takes, help) = match accepts {
             Accepts::NumberOrInterval => (
                 "numbers or intervals",
                 format!("{name}() needs a number: cast the argument or use another aggregate"),
             ),
+            Accepts::Number => {
+                let mut suggested: Vec<String> = Vec::with_capacity(list.args.len());
+                for (i, a) in list.args.iter().enumerate() {
+                    match a {
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => {
+                            if i == 0 {
+                                suggested.push(format!("{e}::numeric"));
+                            } else {
+                                suggested.push(format!("{e}"));
+                            }
+                        }
+                        _ => suggested.push("...".to_string()),
+                    }
+                }
+                (
+                    "a number",
+                    format!(
+                        "Cast the argument to numeric: {name}({})",
+                        suggested.join(", ")
+                    ),
+                )
+            }
             Accepts::Text => (
                 "text",
                 format!("Cast the argument to text: {name}(x::text)"),
             ),
         };
+        let arg_types: Vec<String> = list
+            .args
+            .iter()
+            .map(|a| match a {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => match self.infer_expr_type(e) {
+                    ExpressionType::Known(t) => t.display_name(),
+                    _ => "unknown".to_string(),
+                },
+                _ => "unknown".to_string(),
+            })
+            .collect();
+        let types_str = arg_types.join(", ");
         let mut diag = Diagnostic::error(
             DiagnosticKind::WrongArgumentType,
-            format!("Function {name}({type_name}) does not exist: {name}() takes {takes}"),
+            format!("Function {name}({types_str}) does not exist: {name}() takes {takes}"),
         )
         .with_help(help);
         diag.span = super::type_check::located_span(arg);

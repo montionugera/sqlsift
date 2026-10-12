@@ -122,3 +122,53 @@ fn other_dialects_convert_implicitly() {
         .is_empty());
     }
 }
+
+#[test]
+fn numeric_functions_of_non_numbers() {
+    for sql in [
+        "SELECT round(name) FROM s",
+        "SELECT round(v) FROM s",
+        "SELECT round(name, 2) FROM s",
+        "SELECT round(v, 2) FROM s",
+        "SELECT trunc(name) FROM s",
+        "SELECT trunc(name, 2) FROM s",
+        "SELECT abs(b) FROM s",
+        "SELECT floor(d) FROM s",
+        "SELECT ceil(ts) FROM s",
+        "SELECT ceiling(u) FROM s",
+        "SELECT sign(j) FROM s",
+        "SELECT sqrt(name) FROM s",
+        "SELECT cbrt(name) FROM s",
+        "SELECT exp(name) FROM s",
+        "SELECT ln(name) FROM s",
+    ] {
+        assert_eq!(codes(sql), ["E0027"], "{sql}");
+    }
+}
+
+#[test]
+fn numeric_functions_matching_signatures_pass() {
+    for sql in [
+        "SELECT round(id), round(n), round(f), round(n, 2), trunc(f, 1) FROM s",
+        "SELECT abs(id), ceil(n), floor(f), sign(id), sqrt(n) FROM s",
+        "SELECT round('1.5'), round('1.5', 2) FROM s",
+        "SELECT round(name::numeric), round(name::numeric, 2) FROM s",
+        "SELECT abs(iv) FROM s",
+    ] {
+        assert!(codes(sql).is_empty(), "{sql}: {:?}", codes(sql));
+    }
+
+    let schema = format!(
+        "{SCHEMA}\nCREATE OR REPLACE FUNCTION public.round(text) RETURNS numeric AS $$ SELECT 0::numeric $$ LANGUAGE sql;"
+    );
+    assert!(codes_with(&schema, SqlDialect::PostgreSQL, "SELECT round(name) FROM s").is_empty());
+
+    for dialect in [SqlDialect::MySQL, SqlDialect::SQLite] {
+        assert!(codes_with(
+            SCHEMA,
+            dialect,
+            "SELECT round(name), round(name, 2), abs(b) FROM s"
+        )
+        .is_empty());
+    }
+}
