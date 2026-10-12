@@ -170,3 +170,32 @@ fn multi_argument_text_functions_not_reported() {
         .is_empty());
     }
 }
+
+#[test]
+fn text_functions_parenthesize_complex_expression_in_cast_help() {
+    let mut builder = SchemaBuilder::with_dialect(SqlDialect::PostgreSQL);
+    builder.parse(SCHEMA).expect("schema parses");
+    let catalog = builder.build().0;
+    let analyze = |sql| Analyzer::with_dialect(&catalog, SqlDialect::PostgreSQL).analyze(sql);
+
+    let diags = analyze("SELECT lpad(id + 1, 8, '0') FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("Cast the argument to text: lpad((id + 1)::text, 8, '0')")
+    );
+
+    let diags = analyze("SELECT lower(id + 1) FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("Cast the argument to text: lower((id + 1)::text)")
+    );
+
+    let diags = analyze("SELECT lpad(id, 8, '0') FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("Cast the argument to text: lpad(id::text, 8, '0')")
+    );
+}

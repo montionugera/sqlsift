@@ -72,6 +72,14 @@ fn is_non_numeric(ty: &SqlType) -> bool {
     )
 }
 
+/// Whether an expression needs parentheses before appending a cast `::type`
+fn needs_parens_for_cast(expr: &Expr) -> bool {
+    !matches!(
+        expr,
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_) | Expr::Nested(_)
+    )
+}
+
 impl Resolver<'_> {
     /// Report a built-in function called with an argument type it doesn't accept
     pub(super) fn check_function_signature(&mut self, func: &Function) {
@@ -129,7 +137,11 @@ impl Resolver<'_> {
                     match a {
                         FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => {
                             if i == 0 {
-                                suggested.push(format!("{e}::text"));
+                                if needs_parens_for_cast(e) {
+                                    suggested.push(format!("({e})::text"));
+                                } else {
+                                    suggested.push(format!("{e}::text"));
+                                }
                             } else {
                                 suggested.push(format!("{e}"));
                             }
