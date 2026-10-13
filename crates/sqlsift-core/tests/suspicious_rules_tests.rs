@@ -459,7 +459,7 @@ fn e0031_joins_that_do_not_multiply() {
 }
 
 // ---------------------------------------------------------------------
-// E0032 timestamp-timezone-mismatch
+// E0033 timestamp-timezone-mismatch
 // ---------------------------------------------------------------------
 
 const TS_SCHEMA: &str = "
@@ -482,11 +482,11 @@ fn ts_codes(sql: &str) -> Vec<&'static str> {
 }
 
 #[test]
-fn e0032_comparing_and_assigning_timestamp_with_timestamptz() {
+fn e0033_comparing_and_assigning_timestamp_with_timestamptz() {
     let join_sql = "SELECT * FROM events e JOIN schedules s ON e.occurred_at >= s.starts_at";
     let diags = ts_diagnostics(SqlDialect::PostgreSQL, join_sql);
     assert_eq!(diags.len(), 1, "{diags:?}");
-    assert_eq!(diags[0].code(), "E0032");
+    assert_eq!(diags[0].code(), "E0033");
     assert_eq!(diags[0].severity, Severity::Warning);
     assert_eq!(
         diags[0].message,
@@ -496,12 +496,12 @@ fn e0032_comparing_and_assigning_timestamp_with_timestamptz() {
     let where_sql = "SELECT * FROM events WHERE occurred_at >= local_at";
     let diags = ts_diagnostics(SqlDialect::PostgreSQL, where_sql);
     assert_eq!(diags.len(), 1, "{diags:?}");
-    assert_eq!(diags[0].code(), "E0032");
+    assert_eq!(diags[0].code(), "E0033");
 
     let update_sql = "UPDATE events SET local_at = occurred_at";
     let diags = ts_diagnostics(SqlDialect::PostgreSQL, update_sql);
     assert_eq!(diags.len(), 1, "{diags:?}");
-    assert_eq!(diags[0].code(), "E0032");
+    assert_eq!(diags[0].code(), "E0033");
     assert_eq!(
         diags[0].message,
         "Assigning column 'events.occurred_at' (timestamp with time zone) to 'events.local_at' (timestamp) depends on session TimeZone"
@@ -510,11 +510,11 @@ fn e0032_comparing_and_assigning_timestamp_with_timestamptz() {
     let update_rev = "UPDATE events SET occurred_at = local_at";
     let diags = ts_diagnostics(SqlDialect::PostgreSQL, update_rev);
     assert_eq!(diags.len(), 1, "{diags:?}");
-    assert_eq!(diags[0].code(), "E0032");
+    assert_eq!(diags[0].code(), "E0033");
 }
 
 #[test]
-fn e0032_silent_for_literals_now_and_casts() {
+fn e0033_silent_for_literals_now_and_casts() {
     for sql in [
         // Literals are fine
         "SELECT * FROM events WHERE occurred_at >= '2024-01-01 00:00:00'",
@@ -537,7 +537,7 @@ fn e0032_silent_for_literals_now_and_casts() {
 }
 
 #[test]
-fn e0032_dialect_support() {
+fn e0033_dialect_support() {
     let sql = "SELECT * FROM events WHERE occurred_at >= local_at";
     // PostgreSQL and Redshift warn
     assert_eq!(
@@ -545,7 +545,7 @@ fn e0032_dialect_support() {
             .iter()
             .map(sqlsift_core::Diagnostic::code)
             .collect::<Vec<_>>(),
-        ["E0032"]
+        ["E0033"]
     );
     // Other dialects stay silent
     let mut builder = SchemaBuilder::with_dialect(SqlDialect::MySQL);

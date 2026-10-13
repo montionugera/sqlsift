@@ -739,7 +739,7 @@ impl Resolver<'_> {
         }
     }
 
-    /// Warn when comparing timestamp without time zone and timestamp with time zone (E0032)
+    /// Warn when comparing timestamp without time zone and timestamp with time zone (E0033)
     fn check_timestamp_timezone_mismatch(
         &mut self,
         left: &Expr,
@@ -781,7 +781,7 @@ impl Resolver<'_> {
         self.diagnostics.push(diag);
     }
 
-    /// Warn when assigning timestamp without time zone to timestamp with time zone or vice versa (E0032)
+    /// Warn when assigning timestamp without time zone to timestamp with time zone or vice versa (E0033)
     fn check_timestamp_timezone_assignment(
         &mut self,
         target_name: &str,

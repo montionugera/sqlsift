@@ -367,7 +367,7 @@ pub const RULES: &[Rule] = &[
     },
     Rule {
         kind: DiagnosticKind::TimestampTimezoneMismatch,
-        code: "E0032",
+        code: "E0033",
         name: "timestamp-timezone-mismatch",
         category: RuleCategory::Suspicious,
         summary: "Comparing or assigning timestamp with timestamptz depends on session TimeZone",

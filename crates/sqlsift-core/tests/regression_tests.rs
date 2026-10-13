@@ -148,7 +148,7 @@ fn timestamps_with_different_precision_or_time_zone_are_comparable() {
     ] {
         assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
     }
-    // Column-to-column comparison mixing timestamp and timestamptz warns with E0032,
+    // Column-to-column comparison mixing timestamp and timestamptz warns with E0033,
     // but is not a type mismatch error (E0003).
     let diags = analyze(
         PG_SCHEMA,
