@@ -778,6 +778,9 @@ fn valid_inserts() {
             "INSERT INTO users (uuid, email, name, tags) VALUES ($1, $2, $3, ARRAY['a', 'b'])",
             "INSERT INTO billing.invoices (order_id, amount, issued_on) SELECT id, total, placed_at::date FROM orders WHERE status = 'paid' RETURNING id",
             "WITH src AS (SELECT id, total FROM orders) INSERT INTO billing.invoices (order_id, amount, issued_on) SELECT id, total, CURRENT_DATE FROM src",
+            "INSERT INTO orders (user_id, total, note) VALUES (1, 9.99, 'paid'::order_status)",
+            "INSERT INTO users (uuid, email, name) VALUES (gen_random_uuid(), 'x@y.z', 'paid'::order_status)",
+            "INSERT INTO billing.invoices (order_id, amount, currency, issued_on) VALUES (1, 10.0, 'paid'::order_status, CURRENT_DATE)",
         ],
     );
 }
@@ -807,6 +810,10 @@ fn valid_updates() {
             "UPDATE users SET settings = jsonb_set(settings, '{theme}', '\"dark\"')",
             "UPDATE users SET role = CASE WHEN balance > 1000 THEN 'admin'::user_role ELSE role END",
             "WITH t AS (SELECT user_id, sum(total) AS s FROM orders GROUP BY user_id) UPDATE users SET balance = t.s FROM t WHERE t.user_id = users.id",
+            "UPDATE orders SET note = status",
+            "UPDATE orders SET note = o.status FROM orders o WHERE o.user_id = orders.user_id",
+            "UPDATE users SET name = o.status FROM orders o WHERE o.user_id = users.id",
+            "UPDATE billing.invoices SET currency = o.status FROM orders o WHERE o.id = billing.invoices.order_id",
         ],
     );
 }
@@ -1108,6 +1115,10 @@ fn invalid_type_mismatch() {
             ("UPDATE orders SET status = 1", M),
             (
                 "INSERT INTO orders (user_id, total, status) VALUES (1, 10, 1)",
+                M,
+            ),
+            (
+                "UPDATE orders SET status = u.name FROM users u WHERE u.id = orders.user_id",
                 M,
             ),
         ],
@@ -1653,4 +1664,68 @@ fn syntax_errors_in_other_statements_still_reported() {
             .any(|d| d.kind == DiagnosticKind::ParseError),
         "expected parse error, got: {diagnostics:#?}"
     );
+}
+
+#[test]
+fn valid_enum_to_string_assignments() {
+    let schema = "
+        CREATE TYPE status AS ENUM ('pending', 'paid', 'shipped');
+        CREATE TABLE orders (id BIGINT, user_id BIGINT, status status);
+        CREATE TABLE users (
+            id BIGINT,
+            note TEXT,
+            name VARCHAR(100),
+            code CHAR(10)
+        );
+    ";
+    let valid_cases = [
+        // Exact queries from review feedback:
+        "UPDATE users SET note = o.status FROM orders o WHERE o.user_id = users.id",
+        "INSERT INTO users (id, note) VALUES (1, 'paid'::status)",
+        // Target column is VARCHAR:
+        "UPDATE users SET name = o.status FROM orders o WHERE o.user_id = users.id",
+        "INSERT INTO users (id, name) VALUES (1, 'paid'::status)",
+        // Target column is CHAR:
+        "UPDATE users SET code = o.status FROM orders o WHERE o.user_id = users.id",
+        "INSERT INTO users (id, code) VALUES (1, 'paid'::status)",
+    ];
+    for sql in valid_cases {
+        let diagnostics = analyze_with(schema, sql);
+        assert!(
+            diagnostics.is_empty(),
+            "unexpected diagnostics for `{sql}`: {diagnostics:#?}"
+        );
+    }
+
+    // Assigning a string column/expression into an enum column requires explicit cast:
+    let invalid_assignments = [
+        "UPDATE orders SET status = u.note FROM users u WHERE u.id = orders.user_id",
+        "UPDATE orders SET status = u.name FROM users u WHERE u.id = orders.user_id",
+        "INSERT INTO orders (id, user_id, status) VALUES (1, 1, 'paid'::text)",
+    ];
+    for sql in invalid_assignments {
+        let diagnostics = analyze_with(schema, sql);
+        assert_eq!(
+            kinds_of(&diagnostics),
+            vec![DiagnosticKind::TypeMismatch],
+            "expected TypeMismatch for `{sql}`"
+        );
+    }
+
+    // Comparing an enum with a non-literal string column still fails with E0003/E0007:
+    let invalid_comparisons = [
+        "SELECT * FROM orders o JOIN users u ON o.status = u.note",
+        "SELECT * FROM orders o JOIN users u ON o.status = u.name",
+        "SELECT * FROM orders o, users u WHERE o.status = u.note",
+    ];
+    for sql in invalid_comparisons {
+        let diagnostics = analyze_with(schema, sql);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.kind == DiagnosticKind::TypeMismatch
+                    || d.kind == DiagnosticKind::JoinTypeMismatch),
+            "expected type mismatch for `{sql}`"
+        );
+    }
 }

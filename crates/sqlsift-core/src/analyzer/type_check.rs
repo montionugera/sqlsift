@@ -155,7 +155,7 @@ impl Resolver<'_> {
         ty.accepts_string_literal(literal)
     }
 
-    /// The display names of two types that can't be compared or assigned, or `None`
+    /// The display names of two types that can't be compared, or `None`
     /// if they are compatible (or either is unknown)
     fn type_conflict(
         &self,
@@ -219,6 +219,35 @@ impl Resolver<'_> {
             }
             _ => None,
         }
+    }
+
+    /// Whether `ty` is an enum type (either a named enum in the catalog or an inline enum)
+    fn is_enum_type(&self, ty: &SqlType) -> bool {
+        match ty {
+            SqlType::Enum(_) => true,
+            SqlType::Custom(name) => self.catalog.get_enum(name).is_some(),
+            _ => false,
+        }
+    }
+
+    /// The display names of a target column and value type that can't be assigned,
+    /// or `None` if they are compatible (or either is unknown)
+    fn assignment_conflict(
+        &self,
+        column_type: &ExpressionType,
+        value_type: &ExpressionType,
+    ) -> Option<(String, String)> {
+        if let (ExpressionType::Known(col_type), ExpressionType::Known(val_type)) =
+            (column_type, value_type)
+        {
+            // PostgreSQL accepts assigning an enum into a character string
+            // column (text, varchar, char) via an assignment cast; only the
+            // reverse or a comparison requires an explicit cast
+            if col_type.is_string() && self.is_enum_type(val_type) {
+                return None;
+            }
+        }
+        self.type_conflict(column_type, value_type)
     }
 
     /// Check a comparison's operand types (E0003)
@@ -527,7 +556,9 @@ impl Resolver<'_> {
                 ) {
                     continue;
                 }
-                if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
+                if let Some((expected, actual)) =
+                    self.assignment_conflict(&column_type, &value_type)
+                {
                     let mut diag = assignment_mismatch(col_name, &expected, &actual);
                     // Literals carry no location: fall back to the target column
                     diag.span = located_span(value_expr).or(column_span);
@@ -598,7 +629,7 @@ impl Resolver<'_> {
             ) {
                 continue;
             }
-            if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
+            if let Some((expected, actual)) = self.assignment_conflict(&column_type, &value_type) {
                 let mut diag = assignment_mismatch(&target.ident().value, &expected, &actual);
                 // Literals carry no location: fall back to the target column
                 diag.span = located_span(&assignment.value).or(Some(target_span));
