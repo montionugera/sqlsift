@@ -267,6 +267,19 @@ impl Resolver<'_> {
         }
     }
 
+    /// Check enum values in an IN / NOT IN list against enum labels (#129)
+    pub(super) fn check_in_list(&mut self, expr: &Expr, list: &[Expr]) {
+        let expr_type = self.infer_expr_type(expr);
+        let span = located_span(expr);
+        let column = self.column_label(expr);
+        for item in list {
+            let item_type = self.infer_expr_type(item);
+            let item_span = span.or_else(|| located_span(item));
+            let item_column = column.clone().or_else(|| self.column_label(item));
+            self.report_enum_literal(&expr_type, &item_type, item_column, item_span, false);
+        }
+    }
+
     /// Check type compatibility in a binary operation. `left_type` is the type of
     /// `left` if the caller already inferred it. Returns the operation's result
     /// type if it was inferred along the way (arithmetic), so that a chain of

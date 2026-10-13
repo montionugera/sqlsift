@@ -2004,6 +2004,7 @@ impl<'a> Resolver<'a> {
                         self.note_parameter(e, &ty);
                     }
                 }
+                self.check_in_list(expr, list);
             }
             Expr::InSubquery {
                 expr,
