@@ -257,24 +257,100 @@ fn numeric_functions_parenthesize_complex_expression_in_cast_help() {
     let catalog = builder.build().0;
     let analyze = |sql| Analyzer::with_dialect(&catalog, SqlDialect::PostgreSQL).analyze(sql);
 
-    let diags = analyze("SELECT round(d + 1, 2) FROM s");
+    let diags = analyze("SELECT round(lower(name), 2) FROM s");
     assert_eq!(diags.len(), 1);
     assert_eq!(
         diags[0].help.as_deref(),
-        Some("Cast the argument to numeric: round((d + 1)::numeric, 2)")
+        Some("Cast the argument to numeric: round((lower(name))::numeric, 2)")
     );
 
-    let diags = analyze("SELECT abs(d + 1) FROM s");
+    let diags = analyze("SELECT abs(lower(name)) FROM s");
     assert_eq!(diags.len(), 1);
     assert_eq!(
         diags[0].help.as_deref(),
-        Some("Cast the argument to numeric: abs((d + 1)::numeric)")
+        Some("Cast the argument to numeric: abs((lower(name))::numeric)")
     );
 
-    let diags = analyze("SELECT floor(d + 1) FROM s");
+    let diags = analyze("SELECT floor(lower(name)) FROM s");
     assert_eq!(diags.len(), 1);
     assert_eq!(
         diags[0].help.as_deref(),
-        Some("Cast the argument to numeric: floor((d + 1)::numeric)")
+        Some("Cast the argument to numeric: floor((lower(name))::numeric)")
+    );
+}
+
+#[test]
+fn numeric_functions_help_text() {
+    let mut builder = SchemaBuilder::with_dialect(SqlDialect::PostgreSQL);
+    builder.parse(SCHEMA).expect("schema parses");
+    let catalog = builder.build().0;
+    let analyze = |sql| Analyzer::with_dialect(&catalog, SqlDialect::PostgreSQL).analyze(sql);
+
+    // Text / varchar or jsonb argument -> suggests ::numeric cast
+    let diags = analyze("SELECT round(name, 2) FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("Cast the argument to numeric: round(name::numeric, 2)")
+    );
+
+    let diags = analyze("SELECT abs(v) FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("Cast the argument to numeric: abs(v::numeric)")
+    );
+
+    let diags = analyze("SELECT trunc(c) FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("Cast the argument to numeric: trunc(c::numeric)")
+    );
+
+    let diags = analyze("SELECT floor(j) FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("Cast the argument to numeric: floor(j::numeric)")
+    );
+
+    let diags = analyze("SELECT sign(j) FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("Cast the argument to numeric: sign(j::numeric)")
+    );
+
+    // date argument -> floor() needs a number: convert the date value first
+    let diags = analyze("SELECT floor(d) FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("floor() needs a number: convert the date value first")
+    );
+
+    // boolean argument -> abs() needs a number: convert the boolean value first
+    let diags = analyze("SELECT abs(b) FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("abs() needs a number: convert the boolean value first")
+    );
+
+    // date argument in round(d, 2)
+    let diags = analyze("SELECT round(d, 2) FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("round() needs a number: convert the date value first")
+    );
+
+    // timestamp argument in ceil(ts)
+    let diags = analyze("SELECT ceil(ts) FROM s");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].help.as_deref(),
+        Some("ceil() needs a number: convert the timestamp value first")
     );
 }

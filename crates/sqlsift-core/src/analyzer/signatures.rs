@@ -76,11 +76,46 @@ fn is_non_numeric(ty: &SqlType) -> bool {
     )
 }
 
+/// Types that can be cast to `numeric` in PostgreSQL
+fn can_cast_to_numeric(ty: &SqlType) -> bool {
+    ty.is_string() || matches!(ty, SqlType::Json | SqlType::Jsonb)
+}
+
 /// Whether an expression needs parentheses before appending a cast `::type`
 fn needs_parens_for_cast(expr: &Expr) -> bool {
     !matches!(
         expr,
         Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_) | Expr::Nested(_)
+    )
+}
+
+/// Helper to suggest casting the first argument of a function
+fn format_cast_help(
+    name: &str,
+    target_desc: &str,
+    target_cast: &str,
+    args: &[FunctionArg],
+) -> String {
+    let mut suggested: Vec<String> = Vec::with_capacity(args.len());
+    for (i, a) in args.iter().enumerate() {
+        match a {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => {
+                if i == 0 {
+                    if needs_parens_for_cast(e) {
+                        suggested.push(format!("({e}){target_cast}"));
+                    } else {
+                        suggested.push(format!("{e}{target_cast}"));
+                    }
+                } else {
+                    suggested.push(format!("{e}"));
+                }
+            }
+            _ => suggested.push("...".to_string()),
+        }
+    }
+    format!(
+        "Cast the argument to {target_desc}: {name}({})",
+        suggested.join(", ")
     )
 }
 
@@ -135,36 +170,21 @@ impl Resolver<'_> {
                 "numbers or intervals",
                 format!("{name}() needs a number: cast the argument or use another aggregate"),
             ),
-            Accepts::Number | Accepts::Text => {
-                let (takes, target_cast, target_desc) = match accepts {
-                    Accepts::Number => ("a number", "::numeric", "numeric"),
-                    _ => ("text", "::text", "text"),
-                };
-                let mut suggested: Vec<String> = Vec::with_capacity(list.args.len());
-                for (i, a) in list.args.iter().enumerate() {
-                    match a {
-                        FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => {
-                            if i == 0 {
-                                if needs_parens_for_cast(e) {
-                                    suggested.push(format!("({e}){target_cast}"));
-                                } else {
-                                    suggested.push(format!("{e}{target_cast}"));
-                                }
-                            } else {
-                                suggested.push(format!("{e}"));
-                            }
-                        }
-                        _ => suggested.push("...".to_string()),
-                    }
-                }
-                (
-                    takes,
+            Accepts::Number => {
+                let help = if can_cast_to_numeric(&ty) {
+                    format_cast_help(&name, "numeric", "::numeric", &list.args)
+                } else {
                     format!(
-                        "Cast the argument to {target_desc}: {name}({})",
-                        suggested.join(", ")
-                    ),
-                )
+                        "{name}() needs a number: convert the {} value first",
+                        ty.display_name()
+                    )
+                };
+                ("a number", help)
             }
+            Accepts::Text => (
+                "text",
+                format_cast_help(&name, "text", "::text", &list.args),
+            ),
         };
         let arg_types: Vec<String> = list
             .args
@@ -225,16 +245,20 @@ impl Resolver<'_> {
             return;
         }
         let type_name = ty.display_name();
-        let help_cast = if needs_parens_for_cast(expr) {
-            format!("Cast the argument to numeric: {name}(({expr})::numeric)")
+        let help = if can_cast_to_numeric(&ty) {
+            if needs_parens_for_cast(expr) {
+                format!("Cast the argument to numeric: {name}(({expr})::numeric)")
+            } else {
+                format!("Cast the argument to numeric: {name}({expr}::numeric)")
+            }
         } else {
-            format!("Cast the argument to numeric: {name}({expr}::numeric)")
+            format!("{name}() needs a number: convert the {type_name} value first")
         };
         let mut diag = Diagnostic::error(
             DiagnosticKind::WrongArgumentType,
             format!("Function {name}({type_name}) does not exist: {name}() takes a number"),
         )
-        .with_help(help_cast);
+        .with_help(help);
         diag.span = super::type_check::located_span(expr);
         self.diagnostics.push(diag);
     }
