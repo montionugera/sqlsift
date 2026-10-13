@@ -14,4 +14,6 @@ pub use catalog::{
     PrimaryKeyDef, QualifiedName, Schema, SkippedDefinition, SourceLocation, TableDef,
     UniqueConstraintDef, ViewDef,
 };
-pub use migrations::{is_rollback_migration, strip_down_migrations};
+pub use migrations::{
+    is_rollback_migration, migration_sort_key, sort_migration_files, strip_down_migrations,
+};

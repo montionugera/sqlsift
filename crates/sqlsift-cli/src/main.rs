@@ -21,7 +21,7 @@ use sqlsift_core::embedded::{is_component_file, is_embedded_sql_file, is_in_skip
 use sqlsift_core::go::is_go_file;
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::python::is_python_file;
-use sqlsift_core::schema::{is_rollback_migration, Catalog, SchemaBuilder};
+use sqlsift_core::schema::{is_rollback_migration, sort_migration_files, Catalog, SchemaBuilder};
 use sqlsift_core::sqlx::is_rust_file;
 use sqlsift_core::stack::{with_analysis_stack, ANALYSIS_STACK_SIZE};
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
@@ -418,13 +418,14 @@ fn schema_files(config: &Config, optional: bool) -> Result<Vec<PathBuf>> {
             miette::bail!("Schema directory not found: {}", dir);
         }
         // Rollback migrations (`*.down.sql`, Flyway `U*__*.sql`) are not schema
-        let matches: Vec<PathBuf> = expand_glob(&format!("{dir}/**/*.sql"))?
+        let mut matches: Vec<PathBuf> = expand_glob(&format!("{dir}/**/*.sql"))?
             .into_iter()
             .filter(|path| !is_rollback_migration(path))
             .collect();
         if matches.is_empty() {
             miette::bail!("No .sql files found in schema directory {}", dir);
         }
+        sort_migration_files(&mut matches);
         schema_files.extend(matches);
     }
 

@@ -9,7 +9,9 @@ use sqlsift_core::embedded::is_embedded_sql_file;
 use sqlsift_core::go::is_go_file;
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::python::is_python_file;
-use sqlsift_core::schema::{is_rollback_migration, Catalog, QualifiedName, SchemaBuilder};
+use sqlsift_core::schema::{
+    is_rollback_migration, sort_migration_files, Catalog, QualifiedName, SchemaBuilder,
+};
 use sqlsift_core::sqlx::is_rust_file;
 use sqlsift_core::stack::with_analysis_stack;
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
@@ -599,11 +601,12 @@ fn resolve_schema_files(config: &Config, base_dir: &Path) -> Vec<PathBuf> {
         let pattern = format!("{abs_dir}/**/*.sql");
         if let Ok(paths) = glob::glob(&pattern) {
             // Rollback migrations (`*.down.sql`, Flyway `U*__*.sql`) are not schema
-            files.extend(
-                paths
-                    .flatten()
-                    .filter(|p| !p.is_dir() && !is_rollback_migration(p)),
-            );
+            let mut dir_files: Vec<PathBuf> = paths
+                .flatten()
+                .filter(|p| !p.is_dir() && !is_rollback_migration(p))
+                .collect();
+            sort_migration_files(&mut dir_files);
+            files.extend(dir_files);
         }
     }
 
@@ -681,6 +684,42 @@ mod tests {
         let diagnostics = state.analyze_document(
             "SELECT u.id, o.id, i.id FROM users u CROSS JOIN orders o CROSS JOIN items i",
         );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_schema_dir_natural_version_order() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sqlsift-lsp-natural-order-{}-{nanos}",
+            std::process::id()
+        ));
+        let migrations = root.join("fly");
+        std::fs::create_dir_all(&migrations).unwrap();
+        std::fs::write(root.join("sqlsift.toml"), "schema_dir = \"fly\"\n").unwrap();
+        let files = [
+            ("V1__init.sql", "CREATE TABLE t (a INT);"),
+            ("V2__r.sql", "ALTER TABLE t RENAME COLUMN a TO b;"),
+            ("V10__r.sql", "ALTER TABLE t RENAME COLUMN b TO c;"),
+        ];
+        for (name, sql) in files {
+            std::fs::write(migrations.join(name), sql).unwrap();
+        }
+
+        let mut state = ServerState::new();
+        state.load_config(&root);
+        let errors = state.rebuild_catalog();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(state.schema_files.len(), 3);
+        assert!(state.schema_files[0].ends_with("V1__init.sql"));
+        assert!(state.schema_files[1].ends_with("V2__r.sql"));
+        assert!(state.schema_files[2].ends_with("V10__r.sql"));
+        let diagnostics = state.analyze_document("SELECT c FROM t;");
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
 
         let _ = std::fs::remove_dir_all(&root);
