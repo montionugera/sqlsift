@@ -46,6 +46,71 @@ fn is_flyway_undo(name: &str) -> bool {
             .all(|c| c.is_ascii_digit() || c == '.' || c == '_')
 }
 
+/// Natural sort key for migration files.
+///
+/// Compares the parent directory first so subdirectories are processed in
+/// order without interleaving versions across directories, then compares the
+/// leading version numerically:
+/// - Flyway migrations: `V<version>__<description>.sql`, where the version may
+///   be dotted (`1.2.3`) or underscore-separated (`1_2`), comparing each numeric segment.
+/// - Other migration conventions (goose, golang-migrate, timestamps): the leading ASCII digits.
+///
+/// Files with a version precede unversioned files within the same directory.
+/// Files with equal versions or no version fall back to lexical path comparison.
+///
+/// ```
+/// use std::path::Path;
+/// use sqlsift_core::schema::migration_sort_key;
+///
+/// assert!(migration_sort_key(Path::new("fly/V1__init.sql")) < migration_sort_key(Path::new("fly/V2__r.sql")));
+/// assert!(migration_sort_key(Path::new("fly/V2__r.sql")) < migration_sort_key(Path::new("fly/V10__r.sql")));
+/// assert!(migration_sort_key(Path::new("1_init.sql")) < migration_sort_key(Path::new("10_r.sql")));
+/// assert!(migration_sort_key(Path::new("a_tables/2_orders.sql")) < migration_sort_key(Path::new("b_alter/1_note.sql")));
+/// ```
+pub fn migration_sort_key(path: &Path) -> (&Path, bool, Option<Vec<u64>>, &Path) {
+    let parent = path.parent().unwrap_or(Path::new(""));
+    let version = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(parse_migration_version);
+    (parent, version.is_none(), version, path)
+}
+
+/// Sort migration files by their natural version key.
+pub fn sort_migration_files<P: AsRef<Path>>(files: &mut [P]) {
+    files.sort_by(|a, b| migration_sort_key(a.as_ref()).cmp(&migration_sort_key(b.as_ref())));
+}
+
+fn parse_migration_version(name: &str) -> Option<Vec<u64>> {
+    // 1. Flyway version: V<version>__<description>.sql
+    if let Some(rest) = name.strip_prefix('V').or_else(|| name.strip_prefix('v')) {
+        if let Some((version_str, _)) = rest.split_once("__") {
+            if version_str.starts_with(|c: char| c.is_ascii_digit()) {
+                let parts: Result<Vec<u64>, _> = version_str
+                    .split(['.', '_'])
+                    .map(str::parse::<u64>)
+                    .collect();
+                if let Ok(parts) = parts {
+                    if !parts.is_empty() {
+                        return Some(parts);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Otherwise leading digits (e.g. goose / golang-migrate: 1_init.sql, 002_alter.sql,
+    //    timestamp 20261012120000_create.sql)
+    let digits_len = name.chars().take_while(char::is_ascii_digit).count();
+    if digits_len > 0 {
+        if let Ok(num) = name[..digits_len].parse::<u64>() {
+            return Some(vec![num]);
+        }
+    }
+
+    None
+}
+
 /// Blank out the "down" sections of migration files that hold both directions:
 /// every line after a down marker, up to the next up marker (or the end of the
 /// file). The markers are those of
@@ -125,4 +190,92 @@ fn migrate_marker(line: &str) -> Option<Marker> {
     };
     // Reject e.g. `migrate:downstream`
     (after.is_empty() || after.starts_with(char::is_whitespace)).then_some(marker)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn sorts_flyway_migrations_in_natural_numeric_order() {
+        let mut files = vec![
+            PathBuf::from("fly/V10__r.sql"),
+            PathBuf::from("fly/V2__r.sql"),
+            PathBuf::from("fly/V1__init.sql"),
+            PathBuf::from("fly/V1.2.3__patch.sql"),
+            PathBuf::from("fly/V1.2__minor.sql"),
+            PathBuf::from("fly/V1_1__under.sql"),
+        ];
+        sort_migration_files(&mut files);
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("fly/V1__init.sql"),
+                PathBuf::from("fly/V1_1__under.sql"),
+                PathBuf::from("fly/V1.2__minor.sql"),
+                PathBuf::from("fly/V1.2.3__patch.sql"),
+                PathBuf::from("fly/V2__r.sql"),
+                PathBuf::from("fly/V10__r.sql"),
+            ]
+        );
+    }
+
+    #[test]
+    fn sorts_unpadded_leading_digits_numerically() {
+        let mut files = vec![
+            PathBuf::from("migrations/10_tenth.sql"),
+            PathBuf::from("migrations/2_second.sql"),
+            PathBuf::from("migrations/1_first.sql"),
+        ];
+        sort_migration_files(&mut files);
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("migrations/1_first.sql"),
+                PathBuf::from("migrations/2_second.sql"),
+                PathBuf::from("migrations/10_tenth.sql"),
+            ]
+        );
+    }
+
+    #[test]
+    fn versioned_files_precede_unversioned_files() {
+        let mut files = vec![
+            PathBuf::from("schema/views.sql"),
+            PathBuf::from("schema/V1__init.sql"),
+            PathBuf::from("schema/02_orders.sql"),
+            PathBuf::from("schema/functions.sql"),
+        ];
+        sort_migration_files(&mut files);
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("schema/V1__init.sql"),
+                PathBuf::from("schema/02_orders.sql"),
+                PathBuf::from("schema/functions.sql"),
+                PathBuf::from("schema/views.sql"),
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_directory_order_across_subdirectories() {
+        let mut files = vec![
+            PathBuf::from("db/b_alter/1_note.sql"),
+            PathBuf::from("db/a_tables/2_orders.sql"),
+            PathBuf::from("db/a_tables/10_items.sql"),
+            PathBuf::from("db/a_tables/1_users.sql"),
+        ];
+        sort_migration_files(&mut files);
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("db/a_tables/1_users.sql"),
+                PathBuf::from("db/a_tables/2_orders.sql"),
+                PathBuf::from("db/a_tables/10_items.sql"),
+                PathBuf::from("db/b_alter/1_note.sql"),
+            ]
+        );
+    }
 }

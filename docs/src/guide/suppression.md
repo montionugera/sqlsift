@@ -65,7 +65,7 @@ Diagnostics in the baseline are not printed and don't count toward the exit code
 
 A diagnostic matches a baseline entry by its file (relative to the baseline file, with symbolic links resolved), rule code and the statement it is in. The statement is compared ignoring comments, whitespace (including whitespace around operators, commas and parentheses), the case of keywords and unquoted identifiers, and quotes around a lowercase identifier (`"users"` is `users`); string literals must be unchanged. In TypeScript and JavaScript files only the SQL template counts, not the code around it, and in Rust, Python and Go files only the query's string literal. So adding lines or statements elsewhere in the file, or running a formatter over the statement, keeps the match. Each entry hides one diagnostic, so the same mistake made twice in one statement needs two entries.
 
-When a statement with baselined problems is changed, its diagnostics that are left are still matched by rule code and message against the file's unmatched entries: fixing one of several problems in a statement doesn't make the others new. The entries store no line numbers and are sorted by file, rule, statement hash and message, so adding lines to a file doesn't change the baseline (and doesn't cause merge conflicts in it).
+When a statement with baselined problems is changed, its diagnostics that are left are still matched by rule code and message against the file's unmatched entries: fixing one of several problems in a statement doesn't make the others new. The entries store no line numbers and are sorted by file, rule, statement hash and message, so adding lines to a file doesn't change the baseline.
 
 `--write-baseline` records the diagnostics of the files it checks, and keeps the existing entries of other files that still exist and aren't ignored, printing how many were kept and removed. So it can be run over a few files, and two configurations can share one baseline file. To start over, delete the file first.
 
@@ -86,6 +86,14 @@ sqlsift check --strict-baseline --max-baseline-entries 140
 `sqlsift baseline stats` counts the entries by rule and by file (see the [command line reference](../reference/cli.md#sqlsift-baseline-stats)). In `--format json` output a `baseline` object gives the number of diagnostics hidden and of stale entries, and in SARIF output the hidden diagnostics are listed as suppressed results (see [Output formats](../reference/output-formats.md#sarif)).
 
 Baseline files written by sqlsift 0.1 (format version 1) are still read; `--write-baseline` writes version 2.
+
+### Keeping the baseline healthy
+
+- **Rule flags change what is written**: `sqlsift check -A E0006 --write-baseline` omits E0006 entries; a later run without `-A` reports them as new. Write the baseline with the same files and rule settings as CI.
+- **Deleted and ignored files**: Entries of files that were deleted or are now ignored get removed on the next `--write-baseline`.
+- **What matching tolerates**: Matching survives added lines, re-indentation, comments, and reordering. Format version 2 also normalizes whitespace around operators (`customer_id = 993` vs `customer_id=993`), keyword case (`SELECT` vs `select`), and quotes around lowercase identifiers (`"users"` vs `users`). However, structural changes such as added parentheses, case-sensitive identifier quotes, or altered string literals change the statement hash and make the entry new. (In baseline format version 1, whitespace around operators and keyword case were not normalized; re-run `--write-baseline` to update them).
+- **Matching ignores the message**: A baselined statement can get worse within the same rule without being reported. For example, if a table adds a new `NOT NULL` column, an existing baselined `INSERT` that already misses required columns (E0008) will not report the additional missing column.
+- **Merge conflicts**: When concurrent branches modify baseline entries, Git may produce a merge conflict in `sqlsift-baseline.json`. Do not resolve conflict markers by hand; see [Resolving merge conflicts](../integrations/ci.md#resolving-merge-conflicts).
 
 ## Project-wide: rule levels
 

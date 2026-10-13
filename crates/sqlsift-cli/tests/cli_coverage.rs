@@ -994,6 +994,51 @@ fn schema_dir_applies_migrations_in_filename_order() {
 }
 
 #[test]
+fn schema_dir_applies_flyway_migrations_in_natural_version_order() {
+    let t = TempDir::new("schema-dir-flyway-order");
+    t.write("fly/V1__init.sql", "CREATE TABLE t (a INT);\n");
+    t.write("fly/V2__r.sql", "ALTER TABLE t RENAME COLUMN a TO b;\n");
+    t.write("fly/V10__r.sql", "ALTER TABLE t RENAME COLUMN b TO c;\n");
+    t.write("q.sql", "SELECT c FROM t;\n");
+    t.run(&["check", "--schema-dir", "fly", "q.sql"])
+        .assert_code(0);
+}
+
+#[test]
+fn schema_dir_applies_unpadded_migrations_in_numeric_order() {
+    let t = TempDir::new("schema-dir-unpadded-order");
+    t.write("migrations/1_init.sql", "CREATE TABLE t (a INT);\n");
+    t.write(
+        "migrations/2_r.sql",
+        "ALTER TABLE t RENAME COLUMN a TO b;\n",
+    );
+    t.write(
+        "migrations/10_r.sql",
+        "ALTER TABLE t RENAME COLUMN b TO c;\n",
+    );
+    t.write("q.sql", "SELECT c FROM t;\n");
+    t.run(&["check", "--schema-dir", "migrations", "q.sql"])
+        .assert_code(0);
+}
+
+#[test]
+fn schema_dir_applies_subdirectories_in_directory_order() {
+    let t = TempDir::new("schema-dir-subdirs");
+    t.write("db/a_tables/1_users.sql", "CREATE TABLE users (id INT);\n");
+    t.write(
+        "db/a_tables/2_orders.sql",
+        "CREATE TABLE orders (id INT);\n",
+    );
+    t.write(
+        "db/b_alter/1_note.sql",
+        "ALTER TABLE orders ADD COLUMN note TEXT;\n",
+    );
+    t.write("q.sql", "SELECT note FROM orders;\n");
+    t.run(&["check", "--schema-dir", "db", "q.sql"])
+        .assert_code(0);
+}
+
+#[test]
 fn schema_dir_later_migration_drops_column() {
     let t = TempDir::new("schema-dir-drop");
     t.write(

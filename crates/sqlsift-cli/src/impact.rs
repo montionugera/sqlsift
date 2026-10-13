@@ -65,10 +65,11 @@ fn migration_files(patterns: &[PathBuf]) -> Result<Vec<PathBuf>> {
     for pattern in patterns {
         let text = pattern.to_string_lossy();
         if is_glob(&text) {
-            let matches = expand_glob(&text)?;
+            let mut matches = expand_glob(&text)?;
             if matches.is_empty() {
                 miette::bail!("No migration files match '{}'", text);
             }
+            sqlsift_core::schema::sort_migration_files(&mut matches);
             files.extend(matches);
         } else if pattern.is_file() {
             files.push(pattern.clone());
@@ -152,6 +153,7 @@ pub fn run(config: &Config, options: &ImpactOptions) -> Result<bool> {
             }
         }
     }
+    sqlsift_core::schema::sort_migration_files(&mut migrations);
     let versions = schema_versions(&schema_files, &migrations);
 
     let mut catalogs: Vec<Catalog> = Vec::with_capacity(2);

@@ -110,6 +110,23 @@ baseline = "sqlsift-baseline.json"
 
 From then on `sqlsift check` (and the editor) hides the recorded diagnostics, and new ones fail the check as usual. When a recorded problem is fixed, sqlsift prints a note; run `--prune-baseline` to shrink the file. Add `--strict-baseline` to the CI command to make that note an error, so the baseline only ever shrinks. See [Baseline](../guide/suppression.md#an-existing-backlog-baseline).
 
+### Resolving merge conflicts
+
+Entries in the baseline file are sorted by file, rule, and statement hash, so concurrent pull requests editing different queries usually merge cleanly. However, when branches add or update diagnostics in the same file or adjacent entries, Git may produce a merge conflict in `sqlsift-baseline.json`.
+
+Because JSON conflict markers break parsing, do not resolve the conflict by hand. Instead, accept either side and regenerate the baseline:
+
+```bash
+# Accept incoming or current changes
+git checkout --theirs sqlsift-baseline.json
+# or: git checkout --ours sqlsift-baseline.json
+
+# Regenerate the baseline
+sqlsift check --write-baseline
+```
+
+> Regenerating after a merge absorbs any new errors introduced by the merge as well. Always check `git diff sqlsift-baseline.json` before committing to make sure only intended diagnostics are recorded.
+
 ## Re-check everything when the schema changes
 
 sqlsift's main job is catching queries broken by a schema or migration change, and those query files usually aren't in the PR diff. The simplest setup is to always check every query file, as above: sqlsift checks hundreds of files in well under a second. If you only check changed files, check all of them whenever the schema changes:
