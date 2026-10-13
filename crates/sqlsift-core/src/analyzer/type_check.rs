@@ -13,9 +13,12 @@
 //!   are reported in [`ranges`](super::ranges) (E0017)
 //! - CASE branch consistency, set operation column counts and types
 
+use std::fmt;
+
 use sqlparser::ast::{
-    AssignmentTarget, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
-    Insert, Parens, SetExpr, Spanned, Value, ValueWithSpan,
+    AssignmentTarget, BinaryOperator, ConflictTarget, Expr, FunctionArg, FunctionArgExpr,
+    FunctionArguments, Insert, OnConflictAction, OnInsert, Parens, SetExpr, Spanned,
+    SqliteOnConflict, UnaryOperator, Value, ValueWithSpan,
 };
 
 use crate::ast_ext::{column_ident, insert_table, name_last, ObjectNamePartExt};
@@ -524,6 +527,170 @@ impl Resolver<'_> {
                         .map(|t| Span::from_sqlparser(&t.span))
                 });
                 self.check_value_range(&table_def.name, col_def, value_expr, fallback);
+            }
+        }
+    }
+
+    /// Check for duplicate primary key or unique constraint values within an
+    /// INSERT ... VALUES list (E0032)
+    pub(super) fn check_duplicate_insert_values(
+        &mut self,
+        insert: &Insert,
+        table_def: &TableDef,
+        rows: &[Parens<Vec<Expr>>],
+    ) {
+        if rows.len() < 2 {
+            return;
+        }
+
+        // MySQL INSERT IGNORE and SQLite INSERT OR IGNORE skip unique constraint violations
+        if insert.ignore || matches!(insert.or, Some(SqliteOnConflict::Ignore)) {
+            return;
+        }
+
+        let target_columns: Vec<&str> = if insert.columns.is_empty() {
+            self.positional_columns(table_def)
+        } else {
+            insert
+                .columns
+                .iter()
+                .map(|c| column_ident(c).value.as_str())
+                .collect()
+        };
+
+        // Gather candidate unique keys: (is_primary_key, constraint_name, column_names)
+        let mut keys: Vec<(bool, Option<String>, Vec<String>)> = Vec::new();
+
+        if let Some(pk) = &table_def.primary_key {
+            if !pk.columns.is_empty() {
+                keys.push((true, pk.name.clone(), pk.columns.clone()));
+            }
+        } else {
+            let pk_cols: Vec<String> = table_def
+                .columns
+                .values()
+                .filter(|c| c.is_primary_key)
+                .map(|c| c.name.clone())
+                .collect();
+            if !pk_cols.is_empty() {
+                keys.push((true, None, pk_cols));
+            }
+        }
+
+        for uc in &table_def.unique_constraints {
+            if !uc.columns.is_empty() {
+                keys.push((false, uc.name.clone(), uc.columns.clone()));
+            }
+        }
+
+        for (is_pk, constraint_name, key_cols) in keys {
+            // Check if ON CONFLICT DO NOTHING covers this key
+            if let Some(OnInsert::OnConflict(on_conflict)) = &insert.on {
+                if matches!(on_conflict.action, OnConflictAction::DoNothing) {
+                    match &on_conflict.conflict_target {
+                        None => continue,
+                        Some(ConflictTarget::Columns(target_cols)) => {
+                            let matches_target = target_cols.len() == key_cols.len()
+                                && target_cols.iter().all(|tc| {
+                                    key_cols.iter().any(|kc| kc.eq_ignore_ascii_case(&tc.value))
+                                });
+                            if matches_target {
+                                continue;
+                            }
+                        }
+                        Some(ConflictTarget::OnConstraint(target_name)) => {
+                            let matches_constraint = name_last(target_name).is_some_and(|id| {
+                                constraint_name
+                                    .as_deref()
+                                    .is_some_and(|cn| cn.eq_ignore_ascii_case(&id.value))
+                            });
+                            if matches_constraint {
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Find column positions in target_columns
+            let mut col_indices = Vec::with_capacity(key_cols.len());
+            let mut all_found = true;
+            for kc in &key_cols {
+                if let Some(pos) = target_columns
+                    .iter()
+                    .position(|tc| tc.eq_ignore_ascii_case(kc))
+                {
+                    col_indices.push(pos);
+                } else {
+                    all_found = false;
+                    break;
+                }
+            }
+            if !all_found {
+                continue;
+            }
+
+            // Track seen key tuples: key_tuple -> first_row_index
+            let mut seen: std::collections::HashMap<Vec<LiteralKeyValue>, usize> =
+                std::collections::HashMap::new();
+
+            for (row_idx, row) in rows.iter().enumerate() {
+                if col_indices.iter().any(|&idx| idx >= row.len()) {
+                    continue;
+                }
+
+                let mut key_vals = Vec::with_capacity(col_indices.len());
+                let mut all_literals = true;
+
+                for &idx in &col_indices {
+                    if let Some(val) = extract_literal_key_value(&row[idx]) {
+                        key_vals.push(val);
+                    } else {
+                        all_literals = false;
+                        break;
+                    }
+                }
+
+                if !all_literals {
+                    continue;
+                }
+
+                match seen.entry(key_vals) {
+                    std::collections::hash_map::Entry::Occupied(entry) => {
+                        let key_display = format_key_values(entry.key());
+                        let (message, help) = if is_pk {
+                            (
+                                format!(
+                                    "Duplicate primary key value {key_display} in INSERT VALUES list for table '{}'",
+                                    table_def.name
+                                ),
+                                "Two rows in the same INSERT statement specify the same primary key value. Remove the duplicate row, or specify conflict handling (e.g. ON CONFLICT DO NOTHING)",
+                            )
+                        } else {
+                            let constraint_clause = match &constraint_name {
+                                Some(name) => format!("unique constraint \"{name}\""),
+                                None => format!("unique constraint on ({})", key_cols.join(", ")),
+                            };
+                            (
+                                format!(
+                                    "Duplicate key value {key_display} violates {constraint_clause} for table '{}'",
+                                    table_def.name
+                                ),
+                                "Two rows in the same INSERT statement specify the same unique key value. Remove the duplicate row, or specify conflict handling (e.g. ON CONFLICT DO NOTHING)",
+                            )
+                        };
+
+                        let span = Span::from_sqlparser(&row[col_indices[0]].span());
+                        self.diagnostics.push(
+                            Diagnostic::error(DiagnosticKind::DuplicateInsertValue, message)
+                                .with_span(span)
+                                .with_help(help),
+                        );
+                    }
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(row_idx);
+                    }
+                }
             }
         }
     }
@@ -1097,6 +1264,73 @@ fn is_coercible_pair(a: &SqlType, b: &SqlType) -> bool {
 /// Whether one side is BOOLEAN and the other an integer type
 fn is_integer_boolean_pair(a: &SqlType, b: &SqlType) -> bool {
     (*a == SqlType::Boolean && b.is_integer()) || (*b == SqlType::Boolean && a.is_integer())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum LiteralKeyValue {
+    Integer(i128),
+    Number(String),
+    String(String),
+    Boolean(bool),
+}
+
+impl fmt::Display for LiteralKeyValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Integer(i) => write!(f, "{i}"),
+            Self::Number(n) => write!(f, "{n}"),
+            Self::String(s) => write!(f, "'{s}'"),
+            Self::Boolean(b) => write!(f, "{b}"),
+        }
+    }
+}
+
+fn format_key_values(vals: &[LiteralKeyValue]) -> String {
+    if vals.len() == 1 {
+        vals[0].to_string()
+    } else {
+        format!(
+            "({})",
+            vals.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+fn extract_literal_key_value(expr: &Expr) -> Option<LiteralKeyValue> {
+    match expr {
+        Expr::Value(ValueWithSpan { value, .. }) => match value {
+            Value::Number(n, _) => {
+                if let Ok(i) = n.parse::<i128>() {
+                    Some(LiteralKeyValue::Integer(i))
+                } else {
+                    Some(LiteralKeyValue::Number(n.clone()))
+                }
+            }
+            Value::SingleQuotedString(s)
+            | Value::DoubleQuotedString(s)
+            | Value::NationalStringLiteral(s)
+            | Value::HexStringLiteral(s) => Some(LiteralKeyValue::String(s.clone())),
+            Value::Boolean(b) => Some(LiteralKeyValue::Boolean(*b)),
+            _ => None,
+        },
+        Expr::UnaryOp {
+            op: UnaryOperator::Minus,
+            expr,
+        } => match extract_literal_key_value(expr)? {
+            LiteralKeyValue::Integer(i) => Some(LiteralKeyValue::Integer(-i)),
+            LiteralKeyValue::Number(n) => Some(LiteralKeyValue::Number(format!("-{n}"))),
+            _ => None,
+        },
+        Expr::UnaryOp {
+            op: UnaryOperator::Plus,
+            expr,
+        } => extract_literal_key_value(expr),
+        Expr::Nested(inner) => extract_literal_key_value(inner),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

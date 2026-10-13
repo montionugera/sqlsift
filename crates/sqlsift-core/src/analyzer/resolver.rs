@@ -426,6 +426,7 @@ impl<'a> Resolver<'a> {
                 }
             }
             self.check_insert_values(insert, table_def, rows);
+            self.check_duplicate_insert_values(insert, table_def, rows);
             self.check_generated_insert(insert, table_def, Some(rows));
         } else if let Some(selected) = &selected {
             self.check_generated_insert(insert, table_def, None);
