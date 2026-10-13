@@ -48,13 +48,15 @@ fn is_flyway_undo(name: &str) -> bool {
 
 /// Natural sort key for migration files.
 ///
-/// Compares the leading version numerically:
+/// Compares the parent directory first so subdirectories are processed in
+/// order without interleaving versions across directories, then compares the
+/// leading version numerically:
 /// - Flyway migrations: `V<version>__<description>.sql`, where the version may
 ///   be dotted (`1.2.3`) or underscore-separated (`1_2`), comparing each numeric segment.
 /// - Other migration conventions (goose, golang-migrate, timestamps): the leading ASCII digits.
 ///
-/// Files with a version precede unversioned files. Files with equal versions or no
-/// version fall back to lexical path comparison.
+/// Files with a version precede unversioned files within the same directory.
+/// Files with equal versions or no version fall back to lexical path comparison.
 ///
 /// ```
 /// use std::path::Path;
@@ -63,13 +65,15 @@ fn is_flyway_undo(name: &str) -> bool {
 /// assert!(migration_sort_key(Path::new("fly/V1__init.sql")) < migration_sort_key(Path::new("fly/V2__r.sql")));
 /// assert!(migration_sort_key(Path::new("fly/V2__r.sql")) < migration_sort_key(Path::new("fly/V10__r.sql")));
 /// assert!(migration_sort_key(Path::new("1_init.sql")) < migration_sort_key(Path::new("10_r.sql")));
+/// assert!(migration_sort_key(Path::new("a_tables/2_orders.sql")) < migration_sort_key(Path::new("b_alter/1_note.sql")));
 /// ```
-pub fn migration_sort_key(path: &Path) -> (bool, Option<Vec<u64>>, &Path) {
+pub fn migration_sort_key(path: &Path) -> (&Path, bool, Option<Vec<u64>>, &Path) {
+    let parent = path.parent().unwrap_or(Path::new(""));
     let version = path
         .file_name()
         .and_then(|n| n.to_str())
         .and_then(parse_migration_version);
-    (version.is_none(), version, path)
+    (parent, version.is_none(), version, path)
 }
 
 /// Sort migration files by their natural version key.
@@ -251,6 +255,26 @@ mod tests {
                 PathBuf::from("schema/02_orders.sql"),
                 PathBuf::from("schema/functions.sql"),
                 PathBuf::from("schema/views.sql"),
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_directory_order_across_subdirectories() {
+        let mut files = vec![
+            PathBuf::from("db/b_alter/1_note.sql"),
+            PathBuf::from("db/a_tables/2_orders.sql"),
+            PathBuf::from("db/a_tables/10_items.sql"),
+            PathBuf::from("db/a_tables/1_users.sql"),
+        ];
+        sort_migration_files(&mut files);
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("db/a_tables/1_users.sql"),
+                PathBuf::from("db/a_tables/2_orders.sql"),
+                PathBuf::from("db/a_tables/10_items.sql"),
+                PathBuf::from("db/b_alter/1_note.sql"),
             ]
         );
     }
