@@ -1911,19 +1911,19 @@ impl<'a> Resolver<'a> {
                 let mut chain = Vec::new();
                 let mut leftmost = expr;
                 while let Expr::BinaryOp { left, op, right } = leftmost {
-                    chain.push((&**left, op, &**right));
+                    chain.push((leftmost, &**left, op, &**right));
                     self.note_row_comparison(left, right);
                     leftmost = left;
                 }
                 self.expr(leftmost);
                 // The type of the left operand, passed up an arithmetic chain
                 let mut left_type = None;
-                for (left, op, right) in chain.into_iter().rev() {
+                for (bin_expr, left, op, right) in chain.into_iter().rev() {
                     self.expr(right);
                     self.check_null_comparison(left, op, right);
                     self.check_self_comparison(left, op, right);
                     self.check_row_comparison(left, right);
-                    left_type = self.check_binary_op(left, op, right, left_type);
+                    left_type = self.check_binary_op(bin_expr, left, op, right, left_type);
                 }
             }
             Expr::UnaryOp { expr, .. }

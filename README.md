@@ -217,7 +217,7 @@ The action is also listed on the [GitHub Marketplace](https://github.com/marketp
 | [E0029](https://sqlsift.dev/docs/rules/E0029.html) | implicit-conversion | Type mismatch MySQL or SQLite converts implicitly |
 | [E0030](https://sqlsift.dev/docs/rules/E0030.html) | foreign-key-join-mismatch | JOIN condition doesn't follow the foreign key between the tables |
 | [E0031](https://sqlsift.dev/docs/rules/E0031.html) | join-fan-out | Aggregate over rows that another one-to-many join multiplies |
-| [E0032](https://sqlsift.dev/docs/rules/E0032.html) | integer-division | Division of integer columns truncates toward zero |
+| [E0032](https://sqlsift.dev/docs/rules/E0032.html) | integer-division | Integer division truncates toward zero |
 
 E0001-E0017 and E0027 report queries the database rejects and are errors by default; E0018-E0023 and E0029-E0031 (`suspicious`) report valid queries that almost certainly don't do what was meant and are warnings by default; E0024-E0026 and E0028 (`restriction`) and E0032 (`pedantic`) are off until enabled (`-W restriction`, `-W pedantic`).
 

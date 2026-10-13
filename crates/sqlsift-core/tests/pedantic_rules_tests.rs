@@ -1,4 +1,4 @@
-//! Pedantic rules (off by default): integer division of integer columns (E0032).
+//! Pedantic rules (off by default): integer division (E0032).
 
 use sqlsift_core::dialect::SqlDialect;
 use sqlsift_core::rules::{RuleConfig, RuleLevel};
@@ -73,7 +73,7 @@ fn e0032_column_by_column() {
     assert_eq!(diags[0].code(), "E0032");
     assert_eq!(
         diags[0].message,
-        "Division of integer columns truncates toward zero: integer / integer produces an integer"
+        "Integer division truncates toward zero: integer / integer produces an integer"
     );
     assert_eq!(
         diags[0].help.as_deref(),
@@ -81,6 +81,10 @@ fn e0032_column_by_column() {
             "Cast an operand to NUMERIC or FLOAT if a ratio or average is meant: CAST(x AS NUMERIC) / y"
         )
     );
+    let span = diags[0].span.unwrap();
+    assert_eq!(span.line, 1);
+    assert_eq!(span.column, 8);
+    assert_eq!(span.length, "qty / items".len());
 }
 
 #[test]
@@ -108,11 +112,41 @@ fn e0032_aggregates() {
     assert_eq!(diags[0].code(), "E0032");
     assert_eq!(
         diags[0].message,
-        "Division of integer columns truncates toward zero: bigint / bigint produces an integer"
+        "Integer division truncates toward zero: bigint / bigint produces an integer"
     );
+    let span = diags[0].span.unwrap();
+    assert_eq!(span.line, 1);
+    assert_eq!(span.column, 8);
+    assert_eq!(span.length, 28);
+
+    let diags_count = diagnostics_in(
+        SqlDialect::PostgreSQL,
+        pedantic_rules(),
+        "SELECT count(*) / 10 FROM orders",
+    );
+    assert_eq!(diags_count.len(), 1);
+    let span_count = diags_count[0].span.unwrap();
+    assert_eq!(span_count.line, 1);
+    assert_eq!(span_count.column, 8);
+    assert_eq!(span_count.length, "count(*) / 10".len());
 
     assert_eq!(codes("SELECT count(*) / 10 FROM orders"), ["E0032"]);
     assert_eq!(codes("SELECT 100 / count(*) FROM orders"), ["E0032"]);
+}
+
+#[test]
+fn e0032_function_call() {
+    let diags = diagnostics_in(
+        SqlDialect::PostgreSQL,
+        pedantic_rules(),
+        "SELECT length('test') / 2",
+    );
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code(), "E0032");
+    let span = diags[0].span.unwrap();
+    assert_eq!(span.line, 1);
+    assert_eq!(span.column, 8);
+    assert_eq!(span.length, "length('test') / 2".len());
 }
 
 #[test]

@@ -370,7 +370,7 @@ pub const RULES: &[Rule] = &[
         code: "E0032",
         name: "integer-division",
         category: RuleCategory::Pedantic,
-        summary: "Division of integer columns truncates toward zero",
+        summary: "Integer division truncates toward zero",
     },
     Rule {
         kind: DiagnosticKind::ParseError,

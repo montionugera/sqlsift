@@ -59,5 +59,5 @@ CREATE TABLE coupons (
 | [E0029](E0029.md) | `implicit-conversion` | Type mismatch MySQL or SQLite converts implicitly |
 | [E0030](E0030.md) | `foreign-key-join-mismatch` | JOIN condition doesn't follow the foreign key between the tables |
 | [E0031](E0031.md) | `join-fan-out` | Aggregate over rows that another one-to-many join multiplies |
-| [E0032](E0032.md) | `integer-division` | Division of integer columns truncates toward zero |
+| [E0032](E0032.md) | `integer-division` | Integer division truncates toward zero |
 | [E1000](E1000.md) | `parse-error` | SQL could not be parsed |

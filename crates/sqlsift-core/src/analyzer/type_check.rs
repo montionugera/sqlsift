@@ -275,6 +275,7 @@ impl Resolver<'_> {
     /// operators (`a + b + c ...`) is type checked in linear time.
     pub(super) fn check_binary_op(
         &mut self,
+        expr: &Expr,
         left: &Expr,
         op: &BinaryOperator,
         right: &Expr,
@@ -288,13 +289,14 @@ impl Resolver<'_> {
         let arith_op = arithmetic_op(op)?;
         let left_type = left_type.unwrap_or_else(|| self.infer_expr_type(left));
         let right_type = self.infer_expr_type(right);
-        self.check_arithmetic(left, arith_op, right, &left_type, &right_type);
+        self.check_arithmetic(expr, left, arith_op, right, &left_type, &right_type);
         Some(binary_op_result_type(left_type, op, right_type))
     }
 
     /// Check the operand types of an arithmetic operation
     fn check_arithmetic(
         &mut self,
+        expr: &Expr,
         left: &Expr,
         arith_op: ArithmeticOp,
         right: &Expr,
@@ -372,15 +374,16 @@ impl Resolver<'_> {
             && rt.is_integer()
             && (has_column_or_aggregate(left) || has_column_or_aggregate(right))
         {
-            let span = located_span(left)
-                .or_else(|| located_span(right))
+            let span = located_span(expr)
                 .or_else(|| {
-                    (left.span().start.line > 0).then(|| Span::from_sqlparser(&left.span()))
-                });
+                    (expr.span().start.line > 0).then(|| Span::from_sqlparser(&expr.span()))
+                })
+                .or_else(|| located_span(left))
+                .or_else(|| located_span(right));
             let mut diag = Diagnostic::warning(
                 DiagnosticKind::IntegerDivision,
                 format!(
-                    "Division of integer columns truncates toward zero: {} / {} produces an integer",
+                    "Integer division truncates toward zero: {} / {} produces an integer",
                     lt.display_name_in(self.dialect),
                     rt.display_name_in(self.dialect),
                 ),
@@ -1131,7 +1134,7 @@ fn is_integer_boolean_pair(a: &SqlType, b: &SqlType) -> bool {
     (*a == SqlType::Boolean && b.is_integer()) || (*b == SqlType::Boolean && a.is_integer())
 }
 
-/// Whether an expression references a column or an aggregate function
+/// Whether an expression references a column, aggregate, or function call
 fn has_column_or_aggregate(expr: &Expr) -> bool {
     struct Finder {
         found: bool,
