@@ -521,6 +521,10 @@ fn valid_string_literal_coercions() {
             "UPDATE users SET is_active = false WHERE id = 1",
             "UPDATE orders SET status = 'shipped'::order_status WHERE id = 1",
             "UPDATE users SET role = 'guest'::user_role WHERE id = 1",
+            "SELECT * FROM users WHERE birth_date = 'today'",
+            "SELECT * FROM users WHERE birth_date = '2024-02-29'",
+            "SELECT * FROM orders WHERE placed_at > 'now'",
+            "SELECT * FROM orders WHERE placed_at > 'today UTC'",
         ],
     );
 }
@@ -1095,6 +1099,10 @@ fn invalid_type_mismatch() {
             ("DELETE FROM users WHERE id = 'y'", M),
             ("SELECT * FROM billing.invoices WHERE amount = 'x'", M),
             ("SELECT * FROM billing.invoices WHERE paid = 3", M),
+            ("SELECT * FROM orders WHERE placed_at > 'yesterday-ish'", M),
+            ("SELECT * FROM users WHERE birth_date = '2024-02-30'", M),
+            ("SELECT * FROM users WHERE birth_date = '0000-01-01'", M),
+            ("SELECT * FROM users WHERE birth_date = '2024-13-01'", M),
         ],
     );
 }

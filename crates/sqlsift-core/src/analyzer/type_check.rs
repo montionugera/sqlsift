@@ -152,7 +152,7 @@ impl Resolver<'_> {
         if self.dialect.converts_mismatched_types() && ty.is_numeric() {
             return literal.trim().parse::<f64>().is_ok();
         }
-        ty.accepts_string_literal(literal)
+        ty.accepts_string_literal_in(literal, self.dialect)
     }
 
     /// The display names of two types that can't be compared or assigned, or `None`

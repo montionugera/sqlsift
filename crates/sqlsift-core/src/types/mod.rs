@@ -350,12 +350,16 @@ impl SqlType {
     }
 
     /// Check whether a quoted string literal can be implicitly converted to this type.
+    pub fn accepts_string_literal(&self, literal: &str) -> bool {
+        self.accepts_string_literal_in(literal, SqlDialect::PostgreSQL)
+    }
+
+    /// Check whether a quoted string literal can be implicitly converted to this type
+    /// in the given dialect.
     ///
     /// String literals are untyped until they meet another operand, so `'2024-01-01'`
-    /// is a valid DATE and `'42'` a valid INTEGER. Only numeric and boolean literals are
-    /// validated; for other types (dates, JSON, arrays, enums, ...) the database's input
-    /// format is too permissive to check reliably, so the literal is accepted.
-    pub fn accepts_string_literal(&self, literal: &str) -> bool {
+    /// is a valid DATE and `'42'` a valid INTEGER.
+    pub fn accepts_string_literal_in(&self, literal: &str, dialect: SqlDialect) -> bool {
         let value = literal.trim();
         match self {
             SqlType::TinyInt
@@ -370,6 +374,13 @@ impl SqlType {
                 value.to_ascii_lowercase().as_str(),
                 "t" | "true" | "f" | "false" | "y" | "yes" | "n" | "no" | "on" | "off" | "1" | "0"
             ),
+            SqlType::Date | SqlType::Timestamp { .. } | SqlType::Time { .. } => {
+                if matches!(dialect, SqlDialect::PostgreSQL | SqlDialect::Redshift) {
+                    accepts_date_time_literal(self, value)
+                } else {
+                    true
+                }
+            }
             _ => true,
         }
     }
@@ -583,6 +594,166 @@ pub enum TypeCompatibility {
     ExplicitCast,
 }
 
+fn accepts_date_time_literal(sql_type: &SqlType, value: &str) -> bool {
+    let has_digit = value.chars().any(|c| c.is_ascii_digit());
+    if !has_digit {
+        let first_word = value.split_whitespace().next().unwrap_or("");
+        if first_word.is_empty() {
+            return false;
+        }
+        let is_time = matches!(sql_type, SqlType::Time { .. });
+        if is_time && first_word.eq_ignore_ascii_case("allballs") {
+            return true;
+        }
+        return matches!(
+            first_word.to_ascii_lowercase().as_str(),
+            "epoch" | "infinity" | "-infinity" | "now" | "today" | "tomorrow" | "yesterday"
+        );
+    }
+
+    if let Some(valid) = check_strict_iso_date_time(value) {
+        return valid;
+    }
+
+    if matches!(sql_type, SqlType::Time { .. }) {
+        if let Some(valid) = check_strict_iso_time(value) {
+            return valid;
+        }
+    }
+
+    true
+}
+
+fn check_strict_iso_date_time(value: &str) -> Option<bool> {
+    let (date_part, time_part) = if let Some((d, t)) = value.split_once('T') {
+        (d, Some(t))
+    } else {
+        let mut words = value.split_whitespace();
+        let first = words.next()?;
+        let second = words.next();
+        if words.next().is_some() {
+            return None;
+        }
+        (first, second)
+    };
+
+    let date_parts: Vec<&str> = date_part.split('-').collect();
+    if date_parts.len() != 3 {
+        return None;
+    }
+    let [year_str, month_str, day_str] = [date_parts[0], date_parts[1], date_parts[2]];
+    if year_str.is_empty() || month_str.is_empty() || day_str.is_empty() {
+        return None;
+    }
+    if !year_str.chars().all(|c| c.is_ascii_digit())
+        || !month_str.chars().all(|c| c.is_ascii_digit())
+        || !day_str.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let year = year_str.parse::<u64>().ok()?;
+    let month = month_str.parse::<u64>().ok()?;
+    let day = day_str.parse::<u64>().ok()?;
+
+    if year == 0 {
+        return Some(false);
+    }
+    if !(1..=12).contains(&month) {
+        return Some(false);
+    }
+    if day < 1 || day > days_in_month(year, month) {
+        return Some(false);
+    }
+
+    if let Some(time_str) = time_part {
+        return check_strict_iso_time(time_str);
+    }
+
+    Some(true)
+}
+
+fn check_strict_iso_time(time_str: &str) -> Option<bool> {
+    let parts: Vec<&str> = time_str.split(':').collect();
+    if parts.len() < 2 || parts.len() > 3 {
+        return None;
+    }
+
+    let hour_str = parts[0];
+    let min_str = parts[1];
+    if hour_str.is_empty() || min_str.is_empty() {
+        return None;
+    }
+    if !hour_str.chars().all(|c| c.is_ascii_digit()) || !min_str.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let hour = hour_str.parse::<u64>().ok()?;
+    let min = min_str.parse::<u64>().ok()?;
+
+    let (sec, has_frac) = if parts.len() == 3 {
+        let sec_part = parts[2];
+        let (sec_int_str, frac_str) = if let Some((s, f)) = sec_part.split_once('.') {
+            (s, Some(f))
+        } else {
+            (sec_part, None)
+        };
+        if sec_int_str.is_empty() || !sec_int_str.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let has_frac = if let Some(f) = frac_str {
+            if f.is_empty() || !f.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            f.chars().any(|c| c != '0')
+        } else {
+            false
+        };
+        let sec = sec_int_str.parse::<u64>().ok()?;
+        (sec, has_frac)
+    } else {
+        (0, false)
+    };
+
+    if hour > 24 {
+        return Some(false);
+    }
+    if hour == 24 && (min != 0 || sec != 0 || has_frac) {
+        return Some(false);
+    }
+    if min > 59 {
+        return Some(false);
+    }
+    if sec > 60 {
+        return Some(false);
+    }
+    if sec == 60 && (min != 59 || hour == 24) {
+        return Some(false);
+    }
+
+    Some(true)
+}
+
+fn days_in_month(year: u64, month: u64) -> u64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: u64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,6 +821,70 @@ mod tests {
         assert!(!SqlType::Boolean.accepts_string_literal("maybe"));
         assert!(SqlType::Date.accepts_string_literal("2024-01-01"));
         assert!(SqlType::Jsonb.accepts_string_literal("{}"));
+
+        // Date / Timestamp / Time validation (PostgreSQL / Redshift)
+        let ts = SqlType::Timestamp {
+            precision: None,
+            with_timezone: true,
+        };
+        let time = SqlType::Time {
+            precision: None,
+            with_timezone: false,
+        };
+
+        // Shape 1: no digits and special inputs
+        assert!(SqlType::Date.accepts_string_literal("today"));
+        assert!(SqlType::Date.accepts_string_literal("TODAY"));
+        assert!(SqlType::Date.accepts_string_literal("today UTC"));
+        assert!(SqlType::Date.accepts_string_literal("yesterday"));
+        assert!(SqlType::Date.accepts_string_literal("tomorrow"));
+        assert!(SqlType::Date.accepts_string_literal("now"));
+        assert!(SqlType::Date.accepts_string_literal("epoch"));
+        assert!(SqlType::Date.accepts_string_literal("infinity"));
+        assert!(SqlType::Date.accepts_string_literal("-infinity"));
+        assert!(time.accepts_string_literal("allballs"));
+        assert!(!SqlType::Date.accepts_string_literal("allballs"));
+        assert!(!SqlType::Date.accepts_string_literal("yesterday-ish"));
+        assert!(!SqlType::Date.accepts_string_literal("abc"));
+        assert!(!SqlType::Date.accepts_string_literal("monday"));
+        assert!(!SqlType::Date.accepts_string_literal("January"));
+        assert!(!SqlType::Date.accepts_string_literal("noon"));
+        assert!(!SqlType::Date.accepts_string_literal("xmas"));
+        assert!(!SqlType::Date.accepts_string_literal("BC"));
+        assert!(!SqlType::Date.accepts_string_literal(""));
+
+        // Shape 2: Strict ISO with out-of-range fields
+        assert!(!SqlType::Date.accepts_string_literal("2024-13-01"));
+        assert!(!SqlType::Date.accepts_string_literal("2024-02-30"));
+        assert!(!SqlType::Date.accepts_string_literal("2023-02-29"));
+        assert!(!SqlType::Date.accepts_string_literal("2024-00-10"));
+        assert!(!SqlType::Date.accepts_string_literal("0000-01-01"));
+        assert!(!ts.accepts_string_literal("2024-01-01 25:00"));
+        assert!(!ts.accepts_string_literal("2024-01-01 23:60"));
+        assert!(!time.accepts_string_literal("25:00"));
+        assert!(!time.accepts_string_literal("23:60"));
+
+        // Shape 2: Valid strict ISO formats that must stay accepted
+        assert!(SqlType::Date.accepts_string_literal("2024-02-29"));
+        assert!(SqlType::Date.accepts_string_literal("2024-1-5"));
+        assert!(ts.accepts_string_literal("2024-01-01 24:00"));
+        assert!(ts.accepts_string_literal("2024-01-01 23:59:60"));
+        assert!(time.accepts_string_literal("24:00"));
+        assert!(time.accepts_string_literal("23:59:60"));
+        assert!(time.accepts_string_literal("12:30:45.123"));
+
+        // Permissive formats that stay accepted
+        assert!(SqlType::Date.accepts_string_literal("J2451187"));
+        assert!(SqlType::Date.accepts_string_literal("19990108"));
+        assert!(SqlType::Date.accepts_string_literal("990108"));
+        assert!(SqlType::Date.accepts_string_literal("1999.008"));
+        assert!(SqlType::Date.accepts_string_literal("01/02/2024"));
+        assert!(SqlType::Date.accepts_string_literal("2024-01-01 BC"));
+        assert!(ts.accepts_string_literal("2024-01-01T10:00"));
+
+        // In MySQL and SQLite, date literals are not checked
+        assert!(SqlType::Date.accepts_string_literal_in("2024-02-30", SqlDialect::MySQL));
+        assert!(SqlType::Date.accepts_string_literal_in("yesterday-ish", SqlDialect::SQLite));
     }
 
     #[test]
