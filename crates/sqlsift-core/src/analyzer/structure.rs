@@ -11,15 +11,19 @@
 //! - column alias lists longer than the relation, subqueries and row
 //!   constructors with the wrong number of columns (E0005)
 //! - ORDER BY of SELECT DISTINCT on something not selected (E0015)
+//! - duplicate primary key or unique values in an INSERT VALUES list (E0035)
 //!
 //! Each check is limited to the dialects known to reject the query.
 
+use std::collections::HashMap;
+use std::fmt;
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, Expr, Function, FunctionArguments, GroupByExpr, Ident, Insert,
-    Parens, Query, Select, SelectItem, Spanned, TableFactor, TableWithJoins, Value, ValueWithSpan,
-    Visit, Visitor,
+    Assignment, AssignmentTarget, ConflictTarget, Expr, Function, FunctionArguments, GroupByExpr,
+    Ident, Insert, OnConflictAction, OnInsert, Parens, Query, Select, SelectItem, Spanned,
+    SqliteOnConflict, TableFactor, TableWithJoins, UnaryOperator, Value, ValueWithSpan, Visit,
+    Visitor,
 };
 
 use crate::ast_ext::{column_ident, insert_table, name_last, order_by_exprs, ObjectNamePartExt};
@@ -552,15 +556,7 @@ impl Resolver<'_> {
                     .iter()
                     .all(|c| key.iter().any(|k| k.eq_ignore_ascii_case(&c.value)))
         };
-        let primary_key: Vec<String> = match &table.primary_key {
-            Some(pk) => pk.columns.clone(),
-            None => table
-                .columns
-                .values()
-                .filter(|c| c.is_primary_key)
-                .map(|c| c.name.clone())
-                .collect(),
-        };
+        let primary_key = Self::table_primary_key(table);
         let matches = (!primary_key.is_empty() && same_columns(&primary_key))
             || table
                 .unique_constraints
@@ -595,6 +591,226 @@ impl Resolver<'_> {
             .with_span(Span::from_sqlparser(&columns[0].span))
             .with_help(help),
         );
+    }
+
+    /// Return the columns of a table's primary key (table.primary_key or inline is_primary_key)
+    pub(super) fn table_primary_key(table: &TableDef) -> Vec<String> {
+        match &table.primary_key {
+            Some(pk) => pk.columns.clone(),
+            None => table
+                .columns
+                .values()
+                .filter(|c| c.is_primary_key)
+                .map(|c| c.name.clone())
+                .collect(),
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // E0035 duplicate-insert-value
+    // ---------------------------------------------------------------------
+
+    /// Check for duplicate primary key or unique constraint values within an
+    /// INSERT ... VALUES list (E0035)
+    pub(super) fn check_duplicate_insert_values(
+        &mut self,
+        insert: &Insert,
+        table_def: &TableDef,
+        rows: &[Parens<Vec<Expr>>],
+    ) {
+        if rows.len() < 2 {
+            return;
+        }
+
+        // Database-accepted forms that stay quiet:
+        // - MySQL REPLACE INTO: replace_into is true, later row replaces earlier
+        // - MySQL INSERT IGNORE / SQLite INSERT OR IGNORE: duplicates are ignored
+        // - SQLite INSERT OR REPLACE: later row replaces earlier
+        // - MySQL ON DUPLICATE KEY UPDATE: later row updates earlier
+        if insert.replace_into
+            || insert.ignore
+            || matches!(
+                insert.or,
+                Some(SqliteOnConflict::Replace | SqliteOnConflict::Ignore)
+            )
+            || matches!(insert.on, Some(OnInsert::DuplicateKeyUpdate(_)))
+        {
+            return;
+        }
+
+        if let Some(OnInsert::OnConflict(on_conflict)) = &insert.on {
+            match &on_conflict.action {
+                OnConflictAction::DoUpdate(_) => {
+                    // SQLite ON CONFLICT (id) DO UPDATE allows multiple rows affecting the same key;
+                    // only PostgreSQL and Redshift reject it with "cannot affect row a second time"
+                    if !matches!(self.dialect, SqlDialect::PostgreSQL | SqlDialect::Redshift) {
+                        return;
+                    }
+                }
+                OnConflictAction::DoNothing => {
+                    match &on_conflict.conflict_target {
+                        // Bare ON CONFLICT DO NOTHING covers all keys
+                        None => return,
+                        // ON CONFLICT ON CONSTRAINT ... DO NOTHING: skip any ON CONSTRAINT DO NOTHING
+                        // because implicit constraint names (like users_pkey) are not in the schema
+                        Some(ConflictTarget::OnConstraint(_)) => return,
+                        Some(ConflictTarget::Columns(_)) => {
+                            // Checked per-key below
+                        }
+                    }
+                }
+            }
+        }
+
+        let target_columns: Vec<&str> = if insert.columns.is_empty() {
+            self.positional_columns(table_def)
+        } else {
+            insert
+                .columns
+                .iter()
+                .map(|c| column_ident(c).value.as_str())
+                .collect()
+        };
+
+        // Gather candidate unique keys deduplicated so a column that is both
+        // PRIMARY KEY and UNIQUE is only checked once
+        let mut candidate_keys: Vec<CandidateKey> = Vec::new();
+        let pk_cols = Self::table_primary_key(table_def);
+        let pk_name = table_def
+            .primary_key
+            .as_ref()
+            .and_then(|pk| pk.name.clone());
+        if !pk_cols.is_empty() {
+            candidate_keys.push(CandidateKey {
+                is_primary_key: true,
+                constraint_name: pk_name,
+                columns: pk_cols,
+            });
+        }
+
+        for uc in &table_def.unique_constraints {
+            if uc.columns.is_empty() {
+                continue;
+            }
+            if candidate_keys
+                .iter()
+                .any(|k| same_key_columns(&k.columns, &uc.columns))
+            {
+                continue;
+            }
+            candidate_keys.push(CandidateKey {
+                is_primary_key: false,
+                constraint_name: uc.name.clone(),
+                columns: uc.columns.clone(),
+            });
+        }
+
+        for key in candidate_keys {
+            // Check if ON CONFLICT (columns) DO NOTHING covers this key
+            if let Some(OnInsert::OnConflict(on_conflict)) = &insert.on {
+                if matches!(on_conflict.action, OnConflictAction::DoNothing) {
+                    if let Some(ConflictTarget::Columns(target_cols)) = &on_conflict.conflict_target
+                    {
+                        let matches_target = target_cols.len() == key.columns.len()
+                            && target_cols.iter().all(|tc| {
+                                key.columns
+                                    .iter()
+                                    .any(|kc| kc.eq_ignore_ascii_case(&tc.value))
+                            })
+                            && key.columns.iter().all(|kc| {
+                                target_cols
+                                    .iter()
+                                    .any(|tc| tc.value.eq_ignore_ascii_case(kc))
+                            });
+                        if matches_target {
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // Find column positions in target_columns
+            let mut col_indices = Vec::with_capacity(key.columns.len());
+            let mut all_found = true;
+            for kc in &key.columns {
+                if let Some(pos) = target_columns
+                    .iter()
+                    .position(|tc| tc.eq_ignore_ascii_case(kc))
+                {
+                    col_indices.push(pos);
+                } else {
+                    all_found = false;
+                    break;
+                }
+            }
+            if !all_found {
+                continue;
+            }
+
+            // Track seen key tuples: key_tuple -> first_row_index
+            let mut seen: HashMap<Vec<LiteralKeyValue>, usize> = HashMap::new();
+
+            for (row_idx, row) in rows.iter().enumerate() {
+                if col_indices.iter().any(|&idx| idx >= row.len()) {
+                    continue;
+                }
+
+                let mut key_vals = Vec::with_capacity(col_indices.len());
+                let mut all_literals = true;
+
+                for &idx in &col_indices {
+                    if let Some(val) = extract_literal_key_value(&row[idx]) {
+                        key_vals.push(val);
+                    } else {
+                        all_literals = false;
+                        break;
+                    }
+                }
+
+                if !all_literals {
+                    continue;
+                }
+
+                match seen.entry(key_vals) {
+                    std::collections::hash_map::Entry::Occupied(entry) => {
+                        let key_display = format_key_values(entry.key());
+                        let (message, help) = if key.is_primary_key {
+                            (
+                                format!(
+                                    "Duplicate primary key value {key_display} in INSERT VALUES list for table '{}'",
+                                    table_def.name
+                                ),
+                                "Two rows in the same INSERT statement specify the same primary key value. Remove the duplicate row, or specify conflict handling (e.g. ON CONFLICT DO NOTHING)",
+                            )
+                        } else {
+                            let constraint_clause = match &key.constraint_name {
+                                Some(name) => format!("unique constraint \"{name}\""),
+                                None => {
+                                    format!("unique constraint on ({})", key.columns.join(", "))
+                                }
+                            };
+                            (
+                                format!(
+                                    "Duplicate key value {key_display} violates {constraint_clause} for table '{}'",
+                                    table_def.name
+                                ),
+                                "Two rows in the same INSERT statement specify the same unique key value. Remove the duplicate row, or specify conflict handling (e.g. ON CONFLICT DO NOTHING)",
+                            )
+                        };
+
+                        let span = Span::from_sqlparser(&row[col_indices[0]].span());
+                        self.diagnostics.push(
+                            Diagnostic::error(DiagnosticKind::DuplicateInsertValue, message)
+                                .with_span(span)
+                                .with_help(help),
+                        );
+                    }
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(row_idx);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1039,5 +1255,119 @@ pub(super) fn is_aggregate(func: &Function, dialect: SqlDialect) -> bool {
         "json_arrayagg" | "json_objectagg" => dialect == SqlDialect::MySQL,
         "json_group_array" | "json_group_object" | "total" => dialect == SqlDialect::SQLite,
         _ => false,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CandidateKey {
+    is_primary_key: bool,
+    constraint_name: Option<String>,
+    columns: Vec<String>,
+}
+
+fn same_key_columns(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .all(|k| b.iter().any(|c| c.eq_ignore_ascii_case(k)))
+        && b.iter()
+            .all(|c| a.iter().any(|k| k.eq_ignore_ascii_case(c)))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum LiteralKeyValue {
+    Integer(i128),
+    Number(String),
+    String(String),
+    Bytes(Vec<u8>),
+    Boolean(bool),
+}
+
+impl fmt::Display for LiteralKeyValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Integer(i) => write!(f, "{i}"),
+            Self::Number(n) => write!(f, "{n}"),
+            Self::String(s) => write!(f, "'{s}'"),
+            Self::Bytes(b) => {
+                write!(f, "X'")?;
+                for byte in b {
+                    write!(f, "{byte:02X}")?;
+                }
+                write!(f, "'")
+            }
+            Self::Boolean(b) => write!(f, "{b}"),
+        }
+    }
+}
+
+fn format_key_values(vals: &[LiteralKeyValue]) -> String {
+    if vals.len() == 1 {
+        vals[0].to_string()
+    } else {
+        format!(
+            "({})",
+            vals.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    let clean: String = s.chars().filter(|c| *c != '_').collect();
+    if clean.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(clean.len() / 2);
+    for chunk in clean.as_bytes().chunks_exact(2) {
+        let hi = (chunk[0] as char).to_digit(16)?;
+        let lo = (chunk[1] as char).to_digit(16)?;
+        bytes.push(((hi << 4) | lo) as u8);
+    }
+    Some(bytes)
+}
+
+fn extract_literal_key_value(expr: &Expr) -> Option<LiteralKeyValue> {
+    match expr {
+        Expr::Value(ValueWithSpan { value, .. }) => match value {
+            Value::Number(n, _) => {
+                if let Ok(i) = n.parse::<i128>() {
+                    Some(LiteralKeyValue::Integer(i))
+                } else {
+                    Some(LiteralKeyValue::Number(n.clone()))
+                }
+            }
+            Value::SingleQuotedString(s)
+            | Value::DoubleQuotedString(s)
+            | Value::NationalStringLiteral(s) => Some(LiteralKeyValue::String(s.clone())),
+            Value::HexStringLiteral(s) => {
+                if let Some(bytes) = decode_hex(s) {
+                    if let Ok(decoded) = String::from_utf8(bytes.clone()) {
+                        Some(LiteralKeyValue::String(decoded))
+                    } else {
+                        Some(LiteralKeyValue::Bytes(bytes))
+                    }
+                } else {
+                    Some(LiteralKeyValue::Bytes(s.as_bytes().to_vec()))
+                }
+            }
+            Value::Boolean(b) => Some(LiteralKeyValue::Boolean(*b)),
+            _ => None,
+        },
+        Expr::UnaryOp {
+            op: UnaryOperator::Minus,
+            expr,
+        } => match extract_literal_key_value(expr)? {
+            LiteralKeyValue::Integer(i) => Some(LiteralKeyValue::Integer(-i)),
+            LiteralKeyValue::Number(n) => Some(LiteralKeyValue::Number(format!("-{n}"))),
+            _ => None,
+        },
+        Expr::UnaryOp {
+            op: UnaryOperator::Plus,
+            expr,
+        } => extract_literal_key_value(expr),
+        Expr::Nested(inner) => extract_literal_key_value(inner),
+        _ => None,
     }
 }

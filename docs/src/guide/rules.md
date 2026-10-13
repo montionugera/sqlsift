@@ -38,7 +38,7 @@ E0028  limit-without-order-by    restriction  off      LIMIT or OFFSET without O
 E0029  implicit-conversion       suspicious   warn     Type mismatch MySQL or SQLite converts implicitly
 E0030  foreign-key-join-mismatch suspicious   warn     JOIN condition doesn't follow the foreign key between the tables
 E0031  join-fan-out              suspicious   warn     Aggregate over rows that another one-to-many join multiplies
-E0032  duplicate-insert-value    correctness  error    Duplicate primary key or unique values in an INSERT VALUES list
+E0035  duplicate-insert-value    correctness  error    Duplicate primary key or unique values in an INSERT VALUES list
 E1000  parse-error               correctness  error    SQL could not be parsed
 ```
 

@@ -367,7 +367,7 @@ pub const RULES: &[Rule] = &[
     },
     Rule {
         kind: DiagnosticKind::DuplicateInsertValue,
-        code: "E0032",
+        code: "E0035",
         name: "duplicate-insert-value",
         category: RuleCategory::Correctness,
         summary: "Duplicate primary key or unique values in an INSERT VALUES list",

@@ -1,8 +1,8 @@
-//! E0032 duplicate-insert-value: Duplicate primary key or unique constraint
+//! E0035 duplicate-insert-value: Duplicate primary key or unique constraint
 //! values within one INSERT ... VALUES list.
 //!
 //! Two rows of the same statement colliding on a primary key or unique constraint
-//! always fail at runtime (unless ON CONFLICT DO NOTHING / INSERT IGNORE).
+//! always fail at runtime (unless conflict handling or replacement is specified).
 
 use sqlsift_core::dialect::SqlDialect;
 use sqlsift_core::schema::SchemaBuilder;
@@ -12,6 +12,7 @@ const SCHEMA: &str = "
 CREATE TABLE users (id INT PRIMARY KEY, email TEXT UNIQUE);
 CREATE TABLE memberships (org_id INT, user_id INT, role TEXT, PRIMARY KEY (org_id, user_id));
 CREATE TABLE named_keys (id INT, code TEXT, CONSTRAINT uq_code UNIQUE (code));
+CREATE TABLE pk_and_unique (id INT PRIMARY KEY UNIQUE, val TEXT);
 ";
 
 fn codes_in(dialect: SqlDialect, sql: &str) -> Vec<&'static str> {
@@ -33,8 +34,8 @@ fn pg_codes(sql: &str) -> Vec<&'static str> {
 fn assert_reports(sql: &str) {
     let found = pg_codes(sql);
     assert!(
-        found.contains(&"E0032"),
-        "expected E0032 for {sql}, got {found:?}"
+        found.contains(&"E0035"),
+        "expected E0035 for {sql}, got {found:?}"
     );
 }
 
@@ -44,19 +45,19 @@ fn assert_clean(sql: &str) {
 }
 
 #[test]
-fn e0032_duplicate_primary_key() {
+fn e0035_duplicate_primary_key() {
     assert_reports("INSERT INTO users (id, email) VALUES (1, 'a@x'), (1, 'b@x')");
     assert_reports("INSERT INTO users (id) VALUES (42), (42)");
 }
 
 #[test]
-fn e0032_duplicate_unique_constraint() {
+fn e0035_duplicate_unique_constraint() {
     assert_reports("INSERT INTO users (id, email) VALUES (2, 'a@x'), (3, 'a@x')");
     assert_reports("INSERT INTO named_keys (id, code) VALUES (1, 'ALPHA'), (2, 'ALPHA')");
 }
 
 #[test]
-fn e0032_composite_primary_key() {
+fn e0035_composite_primary_key() {
     // Different composite keys: clean
     assert_clean(
         "INSERT INTO memberships (org_id, user_id, role) VALUES (1, 10, 'admin'), (1, 20, 'member')"
@@ -68,13 +69,13 @@ fn e0032_composite_primary_key() {
 }
 
 #[test]
-fn e0032_positional_insert() {
+fn e0035_positional_insert() {
     assert_reports("INSERT INTO users VALUES (1, 'a@x'), (1, 'b@x')");
     assert_clean("INSERT INTO users VALUES (1, 'a@x'), (2, 'b@x')");
 }
 
 #[test]
-fn e0032_on_conflict_do_nothing() {
+fn e0035_on_conflict_do_nothing() {
     // ON CONFLICT (id) DO NOTHING suppresses duplicate on id
     assert_clean(
         "INSERT INTO users (id, email) VALUES (1, 'a@x'), (1, 'b@x') ON CONFLICT (id) DO NOTHING",
@@ -95,14 +96,14 @@ fn e0032_on_conflict_do_nothing() {
         "INSERT INTO users (id, email) VALUES (1, 'a@x'), (2, 'a@x') ON CONFLICT (id) DO NOTHING",
     );
 
-    // ON CONFLICT DO UPDATE still fails at runtime (cannot affect row a second time)
+    // ON CONFLICT DO UPDATE in PostgreSQL still fails at runtime (cannot affect row a second time)
     assert_reports(
         "INSERT INTO users (id, email) VALUES (1, 'a@x'), (1, 'b@x') ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email"
     );
 }
 
 #[test]
-fn e0032_insert_ignore_dialects() {
+fn e0035_insert_ignore_dialects() {
     // MySQL INSERT IGNORE
     assert_eq!(
         codes_in(
@@ -123,13 +124,104 @@ fn e0032_insert_ignore_dialects() {
 }
 
 #[test]
-fn e0032_null_in_unique_column_is_clean() {
+fn e0035_mysql_accepted_forms() {
+    // MySQL ON DUPLICATE KEY UPDATE: later row wins
+    assert_eq!(
+        codes_in(
+            SqlDialect::MySQL,
+            "INSERT INTO users (id, email) VALUES (1, 'a@x'), (1, 'b@x') ON DUPLICATE KEY UPDATE email = 'updated'"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // MySQL REPLACE INTO: later row replaces
+    assert_eq!(
+        codes_in(
+            SqlDialect::MySQL,
+            "REPLACE INTO users (id, email) VALUES (1, 'a@x'), (1, 'b@x')"
+        ),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
+fn e0035_sqlite_accepted_forms() {
+    // SQLite INSERT OR REPLACE: later row replaces
+    assert_eq!(
+        codes_in(
+            SqlDialect::SQLite,
+            "INSERT OR REPLACE INTO users (id, email) VALUES (1, 'a@x'), (1, 'b@x')"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // SQLite ON CONFLICT (id) DO UPDATE stays quiet (SQLite allows later row to update)
+    assert_eq!(
+        codes_in(
+            SqlDialect::SQLite,
+            "INSERT INTO users (id, email) VALUES (1, 'a@x'), (1, 'b@x') ON CONFLICT (id) DO UPDATE SET email = excluded.email"
+        ),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
+fn e0035_postgres_on_conflict_on_constraint_unnamed() {
+    // ON CONFLICT ON CONSTRAINT users_pkey DO NOTHING stays quiet even if the schema
+    // didn't explicitly name the constraint
+    assert_clean(
+        "INSERT INTO users (id, email) VALUES (1, 'a@x'), (1, 'b@x') ON CONFLICT ON CONSTRAINT users_pkey DO NOTHING"
+    );
+}
+
+#[test]
+fn e0035_hex_literals() {
+    // MySQL: X'41' decodes to 'A', not '41'
+    // X'41' vs '41' does not collide: clean
+    assert_eq!(
+        codes_in(
+            SqlDialect::MySQL,
+            "INSERT INTO users (id, email) VALUES (1, X'41'), (2, '41')"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // X'41' vs 'A' is duplicate: reports E0035
+    let diags = codes_in(
+        SqlDialect::MySQL,
+        "INSERT INTO users (id, email) VALUES (1, X'41'), (2, 'A')",
+    );
+    assert_eq!(diags, vec!["E0035"]);
+
+    // X'41' vs X'41' is duplicate: reports E0035
+    let diags = codes_in(
+        SqlDialect::MySQL,
+        "INSERT INTO users (id, email) VALUES (1, X'41'), (2, X'41')",
+    );
+    assert_eq!(diags, vec!["E0035"]);
+}
+
+#[test]
+fn e0035_column_both_pk_and_unique_reports_once() {
+    let mut builder = SchemaBuilder::with_dialect(SqlDialect::PostgreSQL);
+    builder.parse(SCHEMA).expect("schema parses");
+    let catalog = builder.build().0;
+    let mut analyzer = Analyzer::with_dialect(&catalog, SqlDialect::PostgreSQL);
+
+    let diags = analyzer.analyze("INSERT INTO pk_and_unique (id, val) VALUES (1, 'a'), (1, 'b')");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code(), "E0035");
+    assert!(diags[0].message.contains("Duplicate primary key value 1"));
+}
+
+#[test]
+fn e0035_null_in_unique_column_is_clean() {
     // In SQL standard & Postgres, NULL != NULL for unique constraints
     assert_clean("INSERT INTO users (id, email) VALUES (1, NULL), (2, NULL)");
 }
 
 #[test]
-fn e0032_diagnostics_message_content() {
+fn e0035_diagnostics_message_content() {
     let mut builder = SchemaBuilder::with_dialect(SqlDialect::PostgreSQL);
     builder.parse(SCHEMA).expect("schema parses");
     let catalog = builder.build().0;
@@ -137,7 +229,7 @@ fn e0032_diagnostics_message_content() {
 
     let diags = analyzer.analyze("INSERT INTO users (id, email) VALUES (1, 'a@x'), (1, 'b@x')");
     assert_eq!(diags.len(), 1);
-    assert_eq!(diags[0].code(), "E0032");
+    assert_eq!(diags[0].code(), "E0035");
     assert!(diags[0].message.contains("Duplicate primary key value 1"));
     assert!(diags[0].message.contains("table 'users'"));
 }
