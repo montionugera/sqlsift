@@ -213,11 +213,25 @@ impl Resolver<'_> {
             return;
         }
         if let Some((lt, rt)) = self.type_conflict(&left_type, &right_type) {
+            let help = match (&left_type, &right_type) {
+                (ExpressionType::Known(t), ExpressionType::StringLiteral(lit))
+                | (ExpressionType::StringLiteral(lit), ExpressionType::Known(t))
+                    if matches!(
+                        t,
+                        SqlType::Date | SqlType::Timestamp { .. } | SqlType::Time { .. }
+                    ) =>
+                {
+                    format!("'{lit}' is not a valid {}", t.display_name_in(self.dialect))
+                }
+                _ => {
+                    "Types are not implicitly compatible. Consider using explicit CAST.".to_string()
+                }
+            };
             let mut diag = Diagnostic::error(
                 DiagnosticKind::TypeMismatch,
                 format!("Type mismatch: cannot compare {lt} with {rt}"),
             )
-            .with_help("Types are not implicitly compatible. Consider using explicit CAST.");
+            .with_help(help);
             diag.span = span;
             self.push_mismatch(diag);
         }
@@ -509,6 +523,19 @@ impl Resolver<'_> {
                 }
                 if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
                     let mut diag = assignment_mismatch(col_name, &expected, &actual);
+                    if let (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) =
+                        (&column_type, &value_type)
+                    {
+                        if matches!(
+                            t,
+                            SqlType::Date | SqlType::Timestamp { .. } | SqlType::Time { .. }
+                        ) {
+                            diag = diag.with_help(format!(
+                                "'{lit}' is not a valid {}",
+                                t.display_name_in(self.dialect)
+                            ));
+                        }
+                    }
                     // Literals carry no location: fall back to the target column
                     diag.span = located_span(value_expr).or(column_span);
                     if self.assignment_rejected(&column_type, &value_type) {
@@ -580,6 +607,19 @@ impl Resolver<'_> {
             }
             if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
                 let mut diag = assignment_mismatch(&target.ident().value, &expected, &actual);
+                if let (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) =
+                    (&column_type, &value_type)
+                {
+                    if matches!(
+                        t,
+                        SqlType::Date | SqlType::Timestamp { .. } | SqlType::Time { .. }
+                    ) {
+                        diag = diag.with_help(format!(
+                            "'{lit}' is not a valid {}",
+                            t.display_name_in(self.dialect)
+                        ));
+                    }
+                }
                 // Literals carry no location: fall back to the target column
                 diag.span = located_span(&assignment.value).or(Some(target_span));
                 if self.assignment_rejected(&column_type, &value_type) {

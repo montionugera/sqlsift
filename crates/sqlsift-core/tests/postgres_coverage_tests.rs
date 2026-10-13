@@ -523,8 +523,14 @@ fn valid_string_literal_coercions() {
             "UPDATE users SET role = 'guest'::user_role WHERE id = 1",
             "SELECT * FROM users WHERE birth_date = 'today'",
             "SELECT * FROM users WHERE birth_date = '2024-02-29'",
+            "SELECT * FROM users WHERE birth_date = '12-31-99'",
+            "SELECT * FROM users WHERE birth_date = '1-2-2024'",
             "SELECT * FROM orders WHERE placed_at > 'now'",
             "SELECT * FROM orders WHERE placed_at > 'today UTC'",
+            "SELECT * FROM orders WHERE placed_at = '12:30:60'",
+            "SELECT * FROM orders WHERE placed_at = '+infinity'",
+            "SELECT * FROM orders WHERE placed_at = 'UTC today'",
+            "SELECT * FROM orders WHERE placed_at = 'allballs today'",
         ],
     );
 }

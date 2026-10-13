@@ -597,18 +597,27 @@ pub enum TypeCompatibility {
 fn accepts_date_time_literal(sql_type: &SqlType, value: &str) -> bool {
     let has_digit = value.chars().any(|c| c.is_ascii_digit());
     if !has_digit {
-        let first_word = value.split_whitespace().next().unwrap_or("");
-        if first_word.is_empty() {
+        let is_time = matches!(sql_type, SqlType::Time { .. });
+        if value.split_whitespace().next().is_none() {
             return false;
         }
-        let is_time = matches!(sql_type, SqlType::Time { .. });
-        if is_time && first_word.eq_ignore_ascii_case("allballs") {
-            return true;
-        }
-        return matches!(
-            first_word.to_ascii_lowercase().as_str(),
-            "epoch" | "infinity" | "-infinity" | "now" | "today" | "tomorrow" | "yesterday"
-        );
+        return value.split_whitespace().any(|w| {
+            let lower = w.to_ascii_lowercase();
+            if is_time && lower == "allballs" {
+                return true;
+            }
+            matches!(
+                lower.as_str(),
+                "epoch"
+                    | "infinity"
+                    | "-infinity"
+                    | "+infinity"
+                    | "now"
+                    | "today"
+                    | "tomorrow"
+                    | "yesterday"
+            )
+        });
     }
 
     if let Some(valid) = check_strict_iso_date_time(value) {
@@ -642,7 +651,9 @@ fn check_strict_iso_date_time(value: &str) -> Option<bool> {
         return None;
     }
     let [year_str, month_str, day_str] = [date_parts[0], date_parts[1], date_parts[2]];
-    if year_str.is_empty() || month_str.is_empty() || day_str.is_empty() {
+    // With default DateStyle (ISO, MDY), PG reads '12-31-99' or '1-2-2024' as month-day-year.
+    // Only apply the strict Y-M-D check when the first field has 3+ digits.
+    if year_str.len() < 3 || month_str.is_empty() || day_str.is_empty() {
         return None;
     }
     if !year_str.chars().all(|c| c.is_ascii_digit())
@@ -726,9 +737,6 @@ fn check_strict_iso_time(time_str: &str) -> Option<bool> {
         return Some(false);
     }
     if sec > 60 {
-        return Some(false);
-    }
-    if sec == 60 && (min != 59 || hour == 24) {
         return Some(false);
     }
 
@@ -842,6 +850,10 @@ mod tests {
         assert!(SqlType::Date.accepts_string_literal("epoch"));
         assert!(SqlType::Date.accepts_string_literal("infinity"));
         assert!(SqlType::Date.accepts_string_literal("-infinity"));
+        assert!(SqlType::Date.accepts_string_literal("+infinity"));
+        assert!(SqlType::Date.accepts_string_literal("UTC today"));
+        assert!(ts.accepts_string_literal("+infinity"));
+        assert!(ts.accepts_string_literal("allballs today"));
         assert!(time.accepts_string_literal("allballs"));
         assert!(!SqlType::Date.accepts_string_literal("allballs"));
         assert!(!SqlType::Date.accepts_string_literal("yesterday-ish"));
@@ -872,8 +884,12 @@ mod tests {
         assert!(time.accepts_string_literal("24:00"));
         assert!(time.accepts_string_literal("23:59:60"));
         assert!(time.accepts_string_literal("12:30:45.123"));
+        assert!(time.accepts_string_literal("12:30:60"));
+        assert!(ts.accepts_string_literal("2024-01-01 12:30:60"));
 
         // Permissive formats that stay accepted
+        assert!(SqlType::Date.accepts_string_literal("12-31-99"));
+        assert!(SqlType::Date.accepts_string_literal("1-2-2024"));
         assert!(SqlType::Date.accepts_string_literal("J2451187"));
         assert!(SqlType::Date.accepts_string_literal("19990108"));
         assert!(SqlType::Date.accepts_string_literal("990108"));
