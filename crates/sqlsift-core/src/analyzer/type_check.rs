@@ -13,9 +13,11 @@
 //!   are reported in [`ranges`](super::ranges) (E0017)
 //! - CASE branch consistency, set operation column counts and types
 
+use std::ops::ControlFlow;
+
 use sqlparser::ast::{
     AssignmentTarget, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
-    Insert, Parens, SetExpr, Spanned, Value, ValueWithSpan,
+    Insert, Parens, SetExpr, Spanned, Value, ValueWithSpan, Visit, Visitor,
 };
 
 use crate::ast_ext::{column_ident, insert_table, name_last, ObjectNamePartExt};
@@ -342,9 +344,11 @@ impl Resolver<'_> {
         // An interval or date/time operand with a numeric one is fine only in the
         // combinations allowed above; otherwise report each non-numeric side
         // (Snowflake converts a string operand to a number at run time)
+        let mut non_numeric = false;
         for (ty, expr) in [(lt, left), (rt, right)] {
             let numeric = ty.is_numeric() || (self.dialect.coerces_strings() && ty.is_string());
             if !numeric {
+                non_numeric = true;
                 self.push_mismatch(
                     Diagnostic::error(
                         DiagnosticKind::TypeMismatch,
@@ -356,6 +360,34 @@ impl Resolver<'_> {
                     .with_span(Span::from_sqlparser(&expr.span())),
                 );
             }
+        }
+        if non_numeric {
+            return;
+        }
+
+        // E0032 integer-division: / between integers truncates toward zero
+        if arith_op == ArithmeticOp::Divide
+            && self.dialect.division_truncates_integers()
+            && lt.is_integer()
+            && rt.is_integer()
+            && (has_column_or_aggregate(left) || has_column_or_aggregate(right))
+        {
+            let span = located_span(left)
+                .or_else(|| located_span(right))
+                .or_else(|| {
+                    (left.span().start.line > 0).then(|| Span::from_sqlparser(&left.span()))
+                });
+            let mut diag = Diagnostic::warning(
+                DiagnosticKind::IntegerDivision,
+                format!(
+                    "Division of integer columns truncates toward zero: {} / {} produces an integer",
+                    lt.display_name_in(self.dialect),
+                    rt.display_name_in(self.dialect),
+                ),
+            )
+            .with_help("Cast an operand to NUMERIC or FLOAT if a ratio or average is meant: CAST(x AS NUMERIC) / y");
+            diag.span = span;
+            self.diagnostics.push(diag);
         }
     }
 
@@ -1097,6 +1129,28 @@ fn is_coercible_pair(a: &SqlType, b: &SqlType) -> bool {
 /// Whether one side is BOOLEAN and the other an integer type
 fn is_integer_boolean_pair(a: &SqlType, b: &SqlType) -> bool {
     (*a == SqlType::Boolean && b.is_integer()) || (*b == SqlType::Boolean && a.is_integer())
+}
+
+/// Whether an expression references a column or an aggregate function
+fn has_column_or_aggregate(expr: &Expr) -> bool {
+    struct Finder {
+        found: bool,
+    }
+    impl Visitor for Finder {
+        type Break = ();
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+            match expr {
+                Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Function(_) => {
+                    self.found = true;
+                    ControlFlow::Break(())
+                }
+                _ => ControlFlow::Continue(()),
+            }
+        }
+    }
+    let mut finder = Finder { found: false };
+    let _ = expr.visit(&mut finder);
+    finder.found
 }
 
 #[cfg(test)]
