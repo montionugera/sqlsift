@@ -172,6 +172,26 @@ impl Resolver<'_> {
                     // Snowflake converts strings (and numbers to booleans) at run time
                     return None;
                 }
+                let left_enum_def = match lt {
+                    SqlType::Custom(name) => self.catalog.get_enum(name),
+                    _ => None,
+                };
+                let right_enum_def = match rt {
+                    SqlType::Custom(name) => self.catalog.get_enum(name),
+                    _ => None,
+                };
+                if left_enum_def.is_some() || right_enum_def.is_some() {
+                    let same = match (left_enum_def, right_enum_def) {
+                        (Some(e1), Some(e2)) => std::ptr::eq(e1, e2),
+                        _ => false,
+                    };
+                    return (!same).then(|| {
+                        (
+                            lt.display_name_in(self.dialect),
+                            rt.display_name_in(self.dialect),
+                        )
+                    });
+                }
                 let compatible = lt.is_compatible_with(rt) != TypeCompatibility::ExplicitCast
                     || rt.is_compatible_with(lt) != TypeCompatibility::ExplicitCast;
                 (!compatible).then(|| {

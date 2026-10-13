@@ -303,6 +303,7 @@ fn valid_joins() {
             "SELECT * FROM (SELECT id AS order_id FROM orders) a NATURAL JOIN order_items",
             "SELECT o.id, u.email FROM orders o JOIN users u ON (u.id = o.user_id)",
             "SELECT * FROM users u JOIN orders o ON u.id = o.user_id JOIN billing.invoices i ON i.order_id = o.id WHERE i.paid",
+            "SELECT * FROM orders o1 JOIN orders o2 ON o1.status = o2.status",
         ],
     );
 }
@@ -1095,6 +1096,20 @@ fn invalid_type_mismatch() {
             ("DELETE FROM users WHERE id = 'y'", M),
             ("SELECT * FROM billing.invoices WHERE amount = 'x'", M),
             ("SELECT * FROM billing.invoices WHERE paid = 3", M),
+            ("SELECT * FROM orders WHERE status = 1", M),
+            (
+                "SELECT * FROM orders o JOIN users u ON u.id = o.user_id WHERE o.status = u.name",
+                M,
+            ),
+            (
+                "SELECT * FROM orders o JOIN users u ON u.id = o.user_id WHERE o.status = u.role",
+                M,
+            ),
+            ("UPDATE orders SET status = 1", M),
+            (
+                "INSERT INTO orders (user_id, total, status) VALUES (1, 10, 1)",
+                M,
+            ),
         ],
     );
 }
@@ -1175,6 +1190,11 @@ fn invalid_join_type_mismatch() {
             ),
             (
                 "SELECT * FROM users u JOIN orders o ON o.user_id = u.id AND o.note = u.id",
+                J,
+            ),
+            ("SELECT * FROM orders o JOIN users u ON o.status = u.id", J),
+            (
+                "SELECT * FROM orders o JOIN users u ON o.status = u.name",
                 J,
             ),
         ],
