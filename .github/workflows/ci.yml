@@ -100,6 +100,10 @@ jobs:
           scripts/third-party-licenses.sh
           git diff --exit-code -- THIRD-PARTY-LICENSES.md editors/vscode/THIRD-PARTY-NOTICES.md
 
+      - name: Typecheck VS Code extension
+        working-directory: editors/vscode
+        run: npx tsc --noEmit -p .
+
   examples:
     name: Example projects
     runs-on: ubuntu-latest

@@ -112,6 +112,10 @@ jobs:
       - name: Copy LICENSE
         run: cp LICENSE THIRD-PARTY-LICENSES.md editors/vscode/
 
+      - name: Typecheck extension
+        working-directory: editors/vscode
+        run: npx tsc --noEmit -p .
+
       - name: Bundle extension
         working-directory: editors/vscode
         run: npm run esbuild
