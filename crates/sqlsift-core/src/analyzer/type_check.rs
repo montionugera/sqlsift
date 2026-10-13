@@ -283,24 +283,36 @@ impl Resolver<'_> {
             return None;
         }
 
-        if matches!(
-            op,
-            BinaryOperator::StringConcat
-                | BinaryOperator::Arrow
-                | BinaryOperator::LongArrow
-                | BinaryOperator::HashArrow
-                | BinaryOperator::HashLongArrow
-        ) {
+        if matches!(self.dialect, SqlDialect::PostgreSQL | SqlDialect::Redshift)
+            && matches!(
+                op,
+                BinaryOperator::StringConcat
+                    | BinaryOperator::Arrow
+                    | BinaryOperator::LongArrow
+                    | BinaryOperator::HashArrow
+                    | BinaryOperator::HashLongArrow
+            )
+        {
             let left_type = left_type.unwrap_or_else(|| self.infer_expr_type(left));
             let right_type = self.infer_expr_type(right);
-            return Some(binary_op_result_type(left_type, op, right_type));
+            return Some(binary_op_result_type(
+                self.dialect,
+                left_type,
+                op,
+                right_type,
+            ));
         }
 
         let arith_op = arithmetic_op(op)?;
         let left_type = left_type.unwrap_or_else(|| self.infer_expr_type(left));
         let right_type = self.infer_expr_type(right);
         self.check_arithmetic(left, arith_op, right, &left_type, &right_type);
-        Some(binary_op_result_type(left_type, op, right_type))
+        Some(binary_op_result_type(
+            self.dialect,
+            left_type,
+            op,
+            right_type,
+        ))
     }
 
     /// Check the operand types of an arithmetic operation
@@ -801,9 +813,20 @@ impl Resolver<'_> {
             // String functions
             "CONCAT" | "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "REPLACE" | "SUBSTRING"
             | "SUBSTR" | "LEFT" | "RIGHT" | "LPAD" | "RPAD" | "REPEAT" | "REVERSE" | "INITCAP"
-            | "MD5" | "SPLIT_PART" | "FORMAT" | "STRING_AGG" | "REGEXP_REPLACE"
-            | "REGEXP_SUBSTR" | "BTRIM" | "CHR" | "CONCAT_WS" | "TRANSLATE" | "TO_CHAR" => {
-                ExpressionType::Known(SqlType::Text)
+            | "MD5" | "SPLIT_PART" | "FORMAT" | "REGEXP_REPLACE" | "REGEXP_SUBSTR" | "BTRIM"
+            | "CHR" | "CONCAT_WS" | "TRANSLATE" | "TO_CHAR" => ExpressionType::Known(SqlType::Text),
+            "STRING_AGG" => {
+                let args = unnamed_args(func);
+                match args.first().map(|e| self.infer_expr_type(e)) {
+                    Some(ExpressionType::Known(SqlType::Bytea)) => {
+                        ExpressionType::Known(SqlType::Bytea)
+                    }
+                    Some(ExpressionType::Known(t)) if t.is_string() => {
+                        ExpressionType::Known(SqlType::Text)
+                    }
+                    Some(ExpressionType::StringLiteral(_)) => ExpressionType::Known(SqlType::Text),
+                    _ => ExpressionType::Unknown,
+                }
             }
 
             // String → Integer functions
@@ -860,10 +883,7 @@ impl Resolver<'_> {
                             with_timezone: true,
                         })
                     }
-                    _ => ExpressionType::Known(SqlType::Timestamp {
-                        precision: None,
-                        with_timezone: false,
-                    }),
+                    _ => ExpressionType::Unknown,
                 }
             }
 
@@ -1007,7 +1027,7 @@ impl Resolver<'_> {
         }
         let mut ty = self.infer_expr_type(leftmost);
         for (op, right) in chain.into_iter().rev() {
-            ty = binary_op_result_type(ty, op, self.infer_expr_type(right));
+            ty = binary_op_result_type(self.dialect, ty, op, self.infer_expr_type(right));
         }
         ty
     }
@@ -1027,42 +1047,62 @@ fn unnamed_args(func: &sqlparser::ast::Function) -> Vec<&Expr> {
         .collect()
 }
 
+fn is_string_operand(ty: &ExpressionType) -> bool {
+    match ty {
+        ExpressionType::Known(t) => t.is_string(),
+        ExpressionType::StringLiteral(_) => true,
+        ExpressionType::Unknown => false,
+    }
+}
+
 /// Result type of a binary operation on operands of the given types
 fn binary_op_result_type(
+    dialect: SqlDialect,
     left: ExpressionType,
     op: &BinaryOperator,
     right: ExpressionType,
 ) -> ExpressionType {
-    match op {
-        BinaryOperator::LongArrow | BinaryOperator::HashLongArrow => {
-            return ExpressionType::Known(SqlType::Text);
+    if matches!(dialect, SqlDialect::PostgreSQL | SqlDialect::Redshift) {
+        match op {
+            BinaryOperator::LongArrow | BinaryOperator::HashLongArrow => {
+                return ExpressionType::Known(SqlType::Text);
+            }
+            BinaryOperator::Arrow | BinaryOperator::HashArrow => {
+                return match left {
+                    ExpressionType::Known(t @ (SqlType::Json | SqlType::Jsonb)) => {
+                        ExpressionType::Known(t)
+                    }
+                    _ => ExpressionType::Unknown,
+                };
+            }
+            BinaryOperator::StringConcat => {
+                return match (&left, &right) {
+                    (
+                        ExpressionType::Known(
+                            lt @ (SqlType::Array(_) | SqlType::Json | SqlType::Jsonb),
+                        ),
+                        _,
+                    ) => ExpressionType::Known(lt.clone()),
+                    (
+                        _,
+                        ExpressionType::Known(
+                            rt @ (SqlType::Array(_) | SqlType::Json | SqlType::Jsonb),
+                        ),
+                    ) => ExpressionType::Known(rt.clone()),
+                    (
+                        ExpressionType::Known(SqlType::Bytea),
+                        ExpressionType::Known(SqlType::Bytea),
+                    ) => ExpressionType::Known(SqlType::Bytea),
+                    (ExpressionType::Known(SqlType::Bytea), _)
+                    | (_, ExpressionType::Known(SqlType::Bytea)) => ExpressionType::Unknown,
+                    (l, r) if is_string_operand(l) || is_string_operand(r) => {
+                        ExpressionType::Known(SqlType::Text)
+                    }
+                    _ => ExpressionType::Unknown,
+                };
+            }
+            _ => {}
         }
-        BinaryOperator::Arrow | BinaryOperator::HashArrow => {
-            return match left {
-                ExpressionType::Known(t @ (SqlType::Json | SqlType::Jsonb)) => {
-                    ExpressionType::Known(t)
-                }
-                _ => ExpressionType::Known(SqlType::Jsonb),
-            };
-        }
-        BinaryOperator::StringConcat => {
-            return match (&left, &right) {
-                (
-                    ExpressionType::Known(
-                        lt @ (SqlType::Array(_) | SqlType::Json | SqlType::Jsonb),
-                    ),
-                    _,
-                ) => ExpressionType::Known(lt.clone()),
-                (
-                    _,
-                    ExpressionType::Known(
-                        rt @ (SqlType::Array(_) | SqlType::Json | SqlType::Jsonb),
-                    ),
-                ) => ExpressionType::Known(rt.clone()),
-                _ => ExpressionType::Known(SqlType::Text),
-            };
-        }
-        _ => {}
     }
 
     match (left, right) {

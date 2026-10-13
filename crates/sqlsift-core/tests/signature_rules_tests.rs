@@ -208,3 +208,46 @@ fn text_functions_parenthesize_complex_expression_in_cast_help() {
         Some("Cast the argument to text: lpad(id::text, 8, '0')")
     );
 }
+
+#[test]
+fn regression_review_361_builtin_inference_operator_and_function_refinements() {
+    let schema_with_hstore = format!(
+        "{SCHEMA}\nCREATE TABLE sh (h HSTORE, name TEXT);\nCREATE TABLE flags (flag INT, flag2 INT);\nCREATE TABLE jdata (j JSONB);\n"
+    );
+    let pg = |sql| codes_with(&schema_with_hstore, SqlDialect::PostgreSQL, sql);
+    let mysql = |sql| codes_with(&schema_with_hstore, SqlDialect::MySQL, sql);
+    let sqlite = |sql| codes_with(&schema_with_hstore, SqlDialect::SQLite, sql);
+
+    // 1. bytea: b || b = b and string_agg(b, ',') = b (no false positive)
+    assert!(pg("SELECT id FROM s WHERE by || by = by").is_empty());
+    assert!(pg("SELECT string_agg(by, ',') = by FROM s GROUP BY by").is_empty());
+    assert_eq!(pg("SELECT id FROM s WHERE by || by = 1"), ["E0003"]);
+    assert_eq!(pg("SELECT string_agg(by, ',') = 1 FROM s"), ["E0003"]);
+    assert_eq!(pg("SELECT string_agg(name, ',') = 1 FROM s"), ["E0003"]);
+
+    // 2. array: array_agg(id) || 1 (no false positive)
+    assert!(pg("SELECT array_agg(id) || 1 FROM s").is_empty());
+    assert!(pg("SELECT (array_agg(id) || 1) = ARRAY[1] FROM s").is_empty());
+
+    // 3. hstore: h -> 'k' = name and h -> 'k' LIKE 'a%' (no false positive)
+    assert!(pg("SELECT * FROM sh WHERE h -> 'k' = name").is_empty());
+    assert!(pg("SELECT * FROM sh WHERE h -> 'k' LIKE 'a%'").is_empty());
+    // For jsonb, -> is jsonb so LIKE is rejected
+    assert_eq!(pg("SELECT * FROM s WHERE j -> 'k' LIKE 'a%'"), ["E0027"]);
+
+    // 4. MySQL: flag = 1 || flag2 = 1 (no E0029 false positive)
+    assert!(mysql("SELECT * FROM flags WHERE flag = 1 || flag2 = 1").is_empty());
+
+    // 5. SQLite: j->>'$.n' = 1 (no E0003 false positive)
+    assert!(sqlite("SELECT * FROM jdata WHERE j->>'$.n' = 1").is_empty());
+    // In PostgreSQL, ->> returns text so comparing to int reports E0003
+    assert_eq!(pg("SELECT * FROM jdata WHERE j->>'$.n' = 1"), ["E0003"]);
+
+    // 6. date_trunc with unknown argument stays Unknown (no false positive)
+    assert!(pg("SELECT id FROM s WHERE date_trunc('day', unknown_fn(ts)) = 1").is_empty());
+    // date_trunc with known timestamp column compares to int -> E0003
+    assert_eq!(
+        pg("SELECT id FROM s WHERE date_trunc('day', ts) = 1"),
+        ["E0003"]
+    );
+}

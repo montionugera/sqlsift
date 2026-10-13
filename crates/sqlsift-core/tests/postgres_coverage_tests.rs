@@ -1119,6 +1119,7 @@ fn invalid_type_mismatch() {
             ),
             ("SELECT * FROM users WHERE split_part(email, '@', 1) = 1", M),
             ("SELECT * FROM users WHERE format('%s', name) = 1", M),
+            ("SELECT * FROM users WHERE string_agg(name, ',') = 1", M),
             (
                 "SELECT * FROM users WHERE to_date('2024-01-01', 'YYYY-MM-DD') = 1",
                 M,
