@@ -367,7 +367,7 @@ pub const RULES: &[Rule] = &[
     },
     Rule {
         kind: DiagnosticKind::CaseEnumMissingLabels,
-        code: "E0033",
+        code: "E0034",
         name: "case-enum-missing-labels",
         category: RuleCategory::Pedantic,
         summary: "CASE over an enum column misses some labels and has no ELSE",

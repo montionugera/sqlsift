@@ -1,6 +1,6 @@
 //! Pedantic rules (off by default): stricter checks that may have false positives
 //!
-//! - E0033 case-enum-missing-labels: `CASE` over an enum column that misses some
+//! - E0034 case-enum-missing-labels: `CASE` over an enum column that misses some
 //!   labels and has no `ELSE` clause
 
 use sqlsift_core::dialect::SqlDialect;
@@ -61,11 +61,11 @@ fn off_by_default() {
 }
 
 #[test]
-fn e0033_simple_case_missing_labels() {
+fn e0034_simple_case_missing_labels() {
     let sql = "SELECT CASE status WHEN 'pending' THEN 'Waiting' WHEN 'paid' THEN 'Paid' WHEN 'shipped' THEN 'On its way' END FROM orders";
     let diags = diagnostics_with(SqlDialect::PostgreSQL, PG_SCHEMA, pedantic_rules(), sql);
     assert_eq!(diags.len(), 1, "{diags:?}");
-    assert_eq!(diags[0].code(), "E0033");
+    assert_eq!(diags[0].code(), "E0034");
     assert_eq!(diags[0].severity, Severity::Warning);
     assert_eq!(
         diags[0].message,
@@ -87,11 +87,11 @@ fn e0033_simple_case_missing_labels() {
 }
 
 #[test]
-fn e0033_searched_case_missing_labels() {
+fn e0034_searched_case_missing_labels() {
     let sql = "SELECT CASE WHEN status = 'pending' THEN 'Waiting' WHEN status = 'paid' THEN 'Paid' WHEN status = 'shipped' THEN 'On its way' END FROM orders";
     let diags = diagnostics_with(SqlDialect::PostgreSQL, PG_SCHEMA, pedantic_rules(), sql);
     assert_eq!(diags.len(), 1, "{diags:?}");
-    assert_eq!(diags[0].code(), "E0033");
+    assert_eq!(diags[0].code(), "E0034");
     assert_eq!(
         diags[0].message,
         "CASE over enum column 'orders.status' does not handle: 'cancelled'"
@@ -118,7 +118,7 @@ fn e0033_searched_case_missing_labels() {
 }
 
 #[test]
-fn e0033_silent_when_exhaustive_or_has_else() {
+fn e0034_silent_when_exhaustive_or_has_else() {
     for sql in [
         // Has ELSE clause
         "SELECT CASE status WHEN 'pending' THEN 'Waiting' ELSE 'Other' END FROM orders",
@@ -139,15 +139,200 @@ fn e0033_silent_when_exhaustive_or_has_else() {
 }
 
 #[test]
-fn e0033_mysql_inline_enum() {
-    let sql =
-        "SELECT CASE status WHEN 'pending' THEN 'Waiting' WHEN 'paid' THEN 'Paid' END FROM orders";
-    let diags = diagnostics_with(SqlDialect::MySQL, MYSQL_SCHEMA, pedantic_rules(), sql);
+fn e0034_casts_and_escaped_strings() {
+    // Explicit casts: 'pending'::order_status and CAST('paid' AS order_status)
+    let sql_casts = "SELECT CASE status
+        WHEN 'pending'::order_status THEN '1'
+        WHEN CAST('paid' AS order_status) THEN '2'
+        WHEN 'shipped'::order_status THEN '3'
+        WHEN 'cancelled'::order_status THEN '4'
+    END FROM orders";
+    assert_eq!(codes(sql_casts), Vec::<&str>::new());
+
+    // Escaped string literal E'...' (Postgres extension)
+    let sql_escaped = "SELECT CASE status
+        WHEN E'pending' THEN '1'
+        WHEN E'paid' THEN '2'
+        WHEN E'shipped' THEN '3'
+        WHEN E'cancelled' THEN '4'
+    END FROM orders";
+    assert_eq!(codes(sql_escaped), Vec::<&str>::new());
+
+    // Casted literals in searched CASE
+    let sql_searched_cast = "SELECT CASE
+        WHEN status = 'pending'::order_status THEN '1'
+        WHEN status = E'paid' THEN '2'
+        WHEN status = 'shipped' THEN '3'
+        WHEN status = 'cancelled' THEN '4'
+    END FROM orders";
+    assert_eq!(codes(sql_searched_cast), Vec::<&str>::new());
+
+    // Partial coverage recognizes casted label as handled
+    let sql_partial = "SELECT CASE status WHEN 'pending'::order_status THEN '1' END FROM orders";
+    let diags = diagnostics_with(
+        SqlDialect::PostgreSQL,
+        PG_SCHEMA,
+        pedantic_rules(),
+        sql_partial,
+    );
     assert_eq!(diags.len(), 1, "{diags:?}");
-    assert_eq!(diags[0].code(), "E0033");
+    assert_eq!(diags[0].code(), "E0034");
+    assert_eq!(
+        diags[0].message,
+        "CASE over enum column 'orders.status' does not handle: 'paid', 'shipped', 'cancelled'"
+    );
+}
+
+#[test]
+fn e0034_silent_on_non_literal_when() {
+    // Simple CASE with placeholder WHEN $1
+    assert_eq!(
+        codes("SELECT CASE status WHEN 'pending' THEN '1' WHEN $1 THEN '2' END FROM orders"),
+        Vec::<&str>::new()
+    );
+
+    // Searched CASE with placeholder WHEN status = $1
+    assert_eq!(
+        codes("SELECT CASE WHEN status = 'pending' THEN '1' WHEN status = $1 THEN '2' END FROM orders"),
+        Vec::<&str>::new()
+    );
+
+    // Searched CASE comparing with another column WHEN status = other_col
+    assert_eq!(
+        codes("SELECT CASE WHEN status = 'pending' THEN '1' WHEN status = id THEN '2' END FROM orders"),
+        Vec::<&str>::new()
+    );
+
+    // Searched CASE with placeholder in IN list
+    assert_eq!(
+        codes("SELECT CASE WHEN status IN ('pending', $1) THEN '1' END FROM orders"),
+        Vec::<&str>::new()
+    );
+
+    // Searched CASE with placeholder in OR branch
+    assert_eq!(
+        codes("SELECT CASE WHEN status = 'pending' OR status = $1 THEN '1' END FROM orders"),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
+fn e0034_mysql_inline_enum_and_case_insensitivity() {
+    // Exhaustive case-insensitive matching
+    let sql_ci = "SELECT CASE status
+        WHEN 'PENDING' THEN '1'
+        WHEN 'PAID' THEN '2'
+        WHEN 'SHIPPED' THEN '3'
+        WHEN 'CANCELLED' THEN '4'
+    END FROM orders";
+    let diags_ci = diagnostics_with(SqlDialect::MySQL, MYSQL_SCHEMA, pedantic_rules(), sql_ci);
+    assert!(
+        !diags_ci.iter().any(|d| d.code() == "E0034"),
+        "E0034 should be silent when all labels match case-insensitively on MySQL: {diags_ci:?}"
+    );
+
+    // Searched CASE case-insensitive matching
+    let sql_ci_searched = "SELECT CASE
+        WHEN status = 'PENDING' THEN '1'
+        WHEN status = 'PAID' THEN '2'
+        WHEN status = 'SHIPPED' THEN '3'
+        WHEN status = 'CANCELLED' THEN '4'
+    END FROM orders";
+    let diags_ci_searched = diagnostics_with(
+        SqlDialect::MySQL,
+        MYSQL_SCHEMA,
+        pedantic_rules(),
+        sql_ci_searched,
+    );
+    assert!(
+        !diags_ci_searched.iter().any(|d| d.code() == "E0034"),
+        "E0034 should be silent for searched CASE on MySQL: {diags_ci_searched:?}"
+    );
+
+    // 1-based enum indexing in simple CASE
+    let sql_idx = "SELECT CASE status
+        WHEN 1 THEN '1'
+        WHEN 2 THEN '2'
+        WHEN 3 THEN '3'
+        WHEN 4 THEN '4'
+    END FROM orders";
+    let diags_idx = diagnostics_with(SqlDialect::MySQL, MYSQL_SCHEMA, pedantic_rules(), sql_idx);
+    assert!(
+        !diags_idx.iter().any(|d| d.code() == "E0034"),
+        "E0034 should be silent when matching by 1-based index on MySQL: {diags_idx:?}"
+    );
+
+    // 1-based enum indexing in searched CASE
+    let sql_idx_searched = "SELECT CASE
+        WHEN status = 1 THEN '1'
+        WHEN status = 2 THEN '2'
+        WHEN status = 3 THEN '3'
+        WHEN status = 4 THEN '4'
+    END FROM orders";
+    let diags_idx_searched = diagnostics_with(
+        SqlDialect::MySQL,
+        MYSQL_SCHEMA,
+        pedantic_rules(),
+        sql_idx_searched,
+    );
+    assert!(
+        !diags_idx_searched.iter().any(|d| d.code() == "E0034"),
+        "E0034 should be silent for searched CASE by index on MySQL: {diags_idx_searched:?}"
+    );
+
+    // Partial coverage reports missing labels using schema casing
+    let sql_partial =
+        "SELECT CASE status WHEN 'PENDING' THEN 'Waiting' WHEN 2 THEN 'Paid' END FROM orders";
+    let diags: Vec<_> = diagnostics_with(
+        SqlDialect::MySQL,
+        MYSQL_SCHEMA,
+        pedantic_rules(),
+        sql_partial,
+    )
+    .into_iter()
+    .filter(|d| d.code() == "E0034")
+    .collect();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code(), "E0034");
     assert_eq!(
         diags[0].message,
         "CASE over enum column 'orders.status' does not handle: 'shipped', 'cancelled'"
+    );
+}
+
+#[test]
+fn e0034_silent_in_aggregate_arguments() {
+    for sql in [
+        "SELECT count(CASE WHEN status = 'paid' THEN 1 END) FROM orders",
+        "SELECT count(CASE status WHEN 'paid' THEN 1 END) FROM orders",
+        "SELECT sum(CASE WHEN status = 'paid' THEN id END) FROM orders",
+        "SELECT avg(CASE WHEN status = 'paid' THEN id END) FROM orders",
+        "SELECT min(CASE WHEN status = 'paid' THEN id END) FROM orders",
+        "SELECT max(CASE WHEN status = 'paid' THEN id END) FROM orders",
+        "SELECT array_agg(CASE WHEN status = 'paid' THEN id END) FROM orders",
+        "SELECT string_agg(CASE WHEN status = 'paid' THEN 'x' END, ',') FROM orders",
+        "SELECT bool_or(CASE WHEN status = 'paid' THEN true END) FROM orders",
+        "SELECT bool_and(CASE WHEN status = 'paid' THEN true END) FROM orders",
+    ] {
+        assert_eq!(codes(sql), Vec::<&str>::new(), "{sql}");
+    }
+
+    // Conditional aggregate does not silence sibling non-aggregate CASE
+    let sql_mixed = "SELECT count(CASE WHEN status = 'paid' THEN 1 END), CASE status WHEN 'pending' THEN 1 END FROM orders";
+    let diags: Vec<_> = diagnostics_with(
+        SqlDialect::PostgreSQL,
+        PG_SCHEMA,
+        pedantic_rules(),
+        sql_mixed,
+    )
+    .into_iter()
+    .filter(|d| d.code() == "E0034")
+    .collect();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code(), "E0034");
+    assert_eq!(
+        diags[0].message,
+        "CASE over enum column 'orders.status' does not handle: 'paid', 'shipped', 'cancelled'"
     );
 }
 
@@ -160,6 +345,6 @@ fn single_rule_can_be_enabled() {
     let sql = "SELECT CASE status WHEN 'pending' THEN 'Waiting' END FROM orders";
     let diags = diagnostics_with(SqlDialect::PostgreSQL, PG_SCHEMA, rules, sql);
     assert_eq!(diags.len(), 1);
-    assert_eq!(diags[0].code(), "E0033");
+    assert_eq!(diags[0].code(), "E0034");
     assert_eq!(diags[0].severity, Severity::Error);
 }
