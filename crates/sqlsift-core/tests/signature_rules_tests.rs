@@ -112,6 +112,15 @@ fn functions_and_operators_the_schema_defines_may_overload() {
 }
 
 #[test]
+fn schema_defined_function_skips_builtin_return_type() {
+    let schema = format!(
+        "{SCHEMA}\nCREATE OR REPLACE FUNCTION date_trunc(text, text) RETURNS integer AS $$ SELECT 1 $$ LANGUAGE sql;"
+    );
+    let pg = |sql| codes_with(&schema, SqlDialect::PostgreSQL, sql);
+    assert!(pg("SELECT id FROM s WHERE date_trunc('day', 'x') = 1").is_empty());
+}
+
+#[test]
 fn other_dialects_convert_implicitly() {
     for dialect in [SqlDialect::MySQL, SqlDialect::SQLite] {
         assert!(codes_with(

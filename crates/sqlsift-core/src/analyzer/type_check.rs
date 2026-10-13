@@ -283,6 +283,19 @@ impl Resolver<'_> {
             return None;
         }
 
+        if matches!(
+            op,
+            BinaryOperator::StringConcat
+                | BinaryOperator::Arrow
+                | BinaryOperator::LongArrow
+                | BinaryOperator::HashArrow
+                | BinaryOperator::HashLongArrow
+        ) {
+            let left_type = left_type.unwrap_or_else(|| self.infer_expr_type(left));
+            let right_type = self.infer_expr_type(right);
+            return Some(binary_op_result_type(left_type, op, right_type));
+        }
+
         let arith_op = arithmetic_op(op)?;
         let left_type = left_type.unwrap_or_else(|| self.infer_expr_type(left));
         let right_type = self.infer_expr_type(right);
@@ -630,6 +643,10 @@ impl Resolver<'_> {
             }
             Expr::Function(func) => self.infer_function_return_type(func),
             Expr::Interval(_) => ExpressionType::Known(SqlType::Interval),
+            Expr::Extract { .. } => ExpressionType::Known(SqlType::Decimal {
+                precision: None,
+                scale: None,
+            }),
             Expr::Case {
                 conditions,
                 else_result,
@@ -720,6 +737,10 @@ impl Resolver<'_> {
         let func_name = func.name.to_string().to_uppercase();
         // Strip schema prefix (e.g., "PG_CATALOG.COUNT" → "COUNT")
         let name = func_name.rsplit('.').next().unwrap_or(&func_name);
+        if self.catalog.user_functions.contains(&name.to_lowercase()) {
+            return ExpressionType::Unknown;
+        }
+
         if self.dialect == SqlDialect::BigQuery {
             if let Some(ty) = self.bigquery_function_type(name, func) {
                 return ty;
@@ -780,7 +801,10 @@ impl Resolver<'_> {
             // String functions
             "CONCAT" | "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "REPLACE" | "SUBSTRING"
             | "SUBSTR" | "LEFT" | "RIGHT" | "LPAD" | "RPAD" | "REPEAT" | "REVERSE" | "INITCAP"
-            | "MD5" => ExpressionType::Known(SqlType::Text),
+            | "MD5" | "SPLIT_PART" | "FORMAT" | "STRING_AGG" | "REGEXP_REPLACE"
+            | "REGEXP_SUBSTR" | "BTRIM" | "CHR" | "CONCAT_WS" | "TRANSLATE" | "TO_CHAR" => {
+                ExpressionType::Known(SqlType::Text)
+            }
 
             // String → Integer functions
             "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "BIT_LENGTH" | "OCTET_LENGTH"
@@ -793,15 +817,55 @@ impl Resolver<'_> {
             }
 
             // Date/Time functions
-            "NOW" | "CURRENT_TIMESTAMP" => ExpressionType::Known(SqlType::Timestamp {
+            "NOW" | "CURRENT_TIMESTAMP" | "TO_TIMESTAMP" | "MAKE_TIMESTAMPTZ" => {
+                ExpressionType::Known(SqlType::Timestamp {
+                    precision: None,
+                    with_timezone: true,
+                })
+            }
+            "MAKE_TIMESTAMP" | "LOCALTIMESTAMP" => ExpressionType::Known(SqlType::Timestamp {
                 precision: None,
-                with_timezone: true,
+                with_timezone: false,
             }),
-            "CURRENT_DATE" => ExpressionType::Known(SqlType::Date),
+            "CURRENT_DATE" | "TO_DATE" | "MAKE_DATE" => ExpressionType::Known(SqlType::Date),
             "CURRENT_TIME" => ExpressionType::Known(SqlType::Time {
                 precision: None,
                 with_timezone: true,
             }),
+            "MAKE_TIME" | "LOCALTIME" => ExpressionType::Known(SqlType::Time {
+                precision: None,
+                with_timezone: false,
+            }),
+            "AGE" | "MAKE_INTERVAL" => ExpressionType::Known(SqlType::Interval),
+            "DATE_PART" => ExpressionType::Known(SqlType::DoublePrecision),
+            "EXTRACT" => ExpressionType::Known(SqlType::Decimal {
+                precision: None,
+                scale: None,
+            }),
+            "DATE_TRUNC" => {
+                let args = unnamed_args(func);
+                match args.get(1).map(|e| self.infer_expr_type(e)) {
+                    Some(ExpressionType::Known(SqlType::Interval)) => {
+                        ExpressionType::Known(SqlType::Interval)
+                    }
+                    Some(ExpressionType::Known(SqlType::Timestamp { with_timezone, .. })) => {
+                        ExpressionType::Known(SqlType::Timestamp {
+                            precision: None,
+                            with_timezone,
+                        })
+                    }
+                    Some(ExpressionType::Known(SqlType::Date)) => {
+                        ExpressionType::Known(SqlType::Timestamp {
+                            precision: None,
+                            with_timezone: true,
+                        })
+                    }
+                    _ => ExpressionType::Known(SqlType::Timestamp {
+                        precision: None,
+                        with_timezone: false,
+                    }),
+                }
+            }
 
             _ => ExpressionType::Unknown,
         }
@@ -969,6 +1033,38 @@ fn binary_op_result_type(
     op: &BinaryOperator,
     right: ExpressionType,
 ) -> ExpressionType {
+    match op {
+        BinaryOperator::LongArrow | BinaryOperator::HashLongArrow => {
+            return ExpressionType::Known(SqlType::Text);
+        }
+        BinaryOperator::Arrow | BinaryOperator::HashArrow => {
+            return match left {
+                ExpressionType::Known(t @ (SqlType::Json | SqlType::Jsonb)) => {
+                    ExpressionType::Known(t)
+                }
+                _ => ExpressionType::Known(SqlType::Jsonb),
+            };
+        }
+        BinaryOperator::StringConcat => {
+            return match (&left, &right) {
+                (
+                    ExpressionType::Known(
+                        lt @ (SqlType::Array(_) | SqlType::Json | SqlType::Jsonb),
+                    ),
+                    _,
+                ) => ExpressionType::Known(lt.clone()),
+                (
+                    _,
+                    ExpressionType::Known(
+                        rt @ (SqlType::Array(_) | SqlType::Json | SqlType::Jsonb),
+                    ),
+                ) => ExpressionType::Known(rt.clone()),
+                _ => ExpressionType::Known(SqlType::Text),
+            };
+        }
+        _ => {}
+    }
+
     match (left, right) {
         // Comparisons and logical operators over known operands are boolean
         (ExpressionType::Known(_), ExpressionType::Known(_))
