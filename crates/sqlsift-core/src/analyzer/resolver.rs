@@ -2067,6 +2067,12 @@ impl<'a> Resolver<'a> {
                     .chain(else_result.as_deref())
                     .collect();
                 self.check_case_branches(&branches);
+                self.check_case_enum_missing_labels(
+                    expr,
+                    operand.as_deref(),
+                    conditions,
+                    else_result.as_deref(),
+                );
             }
             Expr::Substring {
                 expr,

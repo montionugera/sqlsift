@@ -366,6 +366,13 @@ pub const RULES: &[Rule] = &[
         summary: "Aggregate over rows that another one-to-many join multiplies",
     },
     Rule {
+        kind: DiagnosticKind::CaseEnumMissingLabels,
+        code: "E0033",
+        name: "case-enum-missing-labels",
+        category: RuleCategory::Pedantic,
+        summary: "CASE over an enum column misses some labels and has no ELSE",
+    },
+    Rule {
         kind: DiagnosticKind::ParseError,
         code: "E1000",
         name: "parse-error",

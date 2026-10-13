@@ -267,6 +267,7 @@ Dependencies must have a license allowed by `deny.toml` (CI job "Licenses"). Aft
 - **E0028** (restriction, off by default): LIMIT / OFFSET / FETCH FIRST without ORDER BY, in subqueries and CTEs too, except the query of an EXISTS (`analyzer/restriction.rs`)
 - **E0030** (suspicious, warning): JOIN ... ON pairing a foreign key column with another key column instead of the column the foreign key links (`orders o JOIN users u ON u.id = o.id` for `orders.user_id REFERENCES users(id)`; `analyzer/suspicious.rs`)
 - **E0031** (suspicious, warning): sum/avg/count over a table joined one-to-many next to another one-to-many join of the same parent (double counting; `analyzer/fan_out.rs`)
+- **E0033** (pedantic, off by default): CASE over an enum column misses some labels and has no ELSE (`analyzer/pedantic.rs`)
 - **E1000**: Generic parse error
 
 ## Release Process

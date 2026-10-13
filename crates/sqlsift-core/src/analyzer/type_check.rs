@@ -660,7 +660,7 @@ impl Resolver<'_> {
 
     /// Type of `table.column`
     /// `table.column` for an expression that is a column reference
-    fn column_label(&self, expr: &Expr) -> Option<String> {
+    pub(super) fn column_label(&self, expr: &Expr) -> Option<String> {
         let (relation, column) = match expr {
             Expr::Identifier(ident) => (
                 self.scope.column_relation(&ident.value, self.dialect)?,

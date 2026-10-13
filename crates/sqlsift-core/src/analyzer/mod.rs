@@ -7,6 +7,7 @@ mod fan_out;
 mod grouping;
 mod nullability;
 mod parameters;
+mod pedantic;
 mod ranges;
 mod resolver;
 mod restriction;

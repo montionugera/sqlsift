@@ -213,6 +213,8 @@ pub enum DiagnosticKind {
     ForeignKeyJoinMismatch,
     /// E0031: Aggregate over a table whose rows another one-to-many join multiplies
     JoinFanOut,
+    /// E0033: CASE over an enum column misses some labels and has no ELSE
+    CaseEnumMissingLabels,
     /// Parse error
     ParseError,
 }
