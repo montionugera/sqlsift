@@ -59,4 +59,5 @@ CREATE TABLE coupons (
 | [E0029](E0029.md) | `implicit-conversion` | Type mismatch MySQL or SQLite converts implicitly |
 | [E0030](E0030.md) | `foreign-key-join-mismatch` | JOIN condition doesn't follow the foreign key between the tables |
 | [E0031](E0031.md) | `join-fan-out` | Aggregate over rows that another one-to-many join multiplies |
+| [E0032](E0032.md) | `timestamp-timezone-mismatch` | Comparing or assigning timestamp with timestamptz depends on session TimeZone |
 | [E1000](E1000.md) | `parse-error` | SQL could not be parsed |

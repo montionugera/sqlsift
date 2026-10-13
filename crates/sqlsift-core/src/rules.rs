@@ -366,6 +366,13 @@ pub const RULES: &[Rule] = &[
         summary: "Aggregate over rows that another one-to-many join multiplies",
     },
     Rule {
+        kind: DiagnosticKind::TimestampTimezoneMismatch,
+        code: "E0032",
+        name: "timestamp-timezone-mismatch",
+        category: RuleCategory::Suspicious,
+        summary: "Comparing or assigning timestamp with timestamptz depends on session TimeZone",
+    },
+    Rule {
         kind: DiagnosticKind::ParseError,
         code: "E1000",
         name: "parse-error",

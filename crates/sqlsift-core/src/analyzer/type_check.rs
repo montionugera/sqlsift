@@ -220,7 +220,9 @@ impl Resolver<'_> {
             .with_help("Types are not implicitly compatible. Consider using explicit CAST.");
             diag.span = span;
             self.push_mismatch(diag);
+            return;
         }
+        self.check_timestamp_timezone_mismatch(left, &left_type, right, &right_type, span);
     }
 
     /// Check a comparison in a JOIN ... ON condition (E0007)
@@ -244,7 +246,9 @@ impl Resolver<'_> {
                     "JOIN condition should compare compatible types. Consider using explicit CAST.",
                 ),
             );
+            return;
         }
+        self.check_timestamp_timezone_mismatch(left, &left_type, right, &right_type, span);
     }
 
     /// Check `expr IN (SELECT col ...)`: the value must be comparable with the column
@@ -264,6 +268,29 @@ impl Resolver<'_> {
             .with_help("Types are not implicitly compatible. Consider using explicit CAST.");
             diag.span = located_span(expr);
             self.push_mismatch(diag);
+            return;
+        }
+        if self.dialect.timestamp_timezone_is_session_dependent() && is_column_reference(expr) {
+            if let (Some(left_col), ExpressionType::Known(vt), ExpressionType::Known(ct)) =
+                (self.column_label_or_name(expr), &value_type, &column.ty)
+            {
+                if is_timestamp_timezone_mix(vt, ct) {
+                    let mut diag = Diagnostic::warning(
+                        DiagnosticKind::TimestampTimezoneMismatch,
+                        format!(
+                            "Comparing column '{left_col}' ({}) with '{}' ({}) of the subquery depends on session TimeZone",
+                            vt.display_name(),
+                            column.name,
+                            ct.display_name()
+                        ),
+                    )
+                    .with_help(
+                        "Conversion between timestamp and timestamp with time zone shifts by session TimeZone. Use explicit AT TIME ZONE or CAST.",
+                    );
+                    diag.span = located_span(expr);
+                    self.diagnostics.push(diag);
+                }
+            }
         }
     }
 
@@ -523,6 +550,14 @@ impl Resolver<'_> {
                         .and_then(name_last)
                         .map(|t| Span::from_sqlparser(&t.span))
                 });
+                let target_label = format!("{}.{}", table_def.name, col_name);
+                self.check_timestamp_timezone_assignment(
+                    &target_label,
+                    &col_def.data_type,
+                    value_expr,
+                    &value_type,
+                    column_span.or_else(|| located_span(value_expr)),
+                );
                 self.check_value_range(&table_def.name, col_def, value_expr, fallback);
             }
         }
@@ -589,6 +624,14 @@ impl Resolver<'_> {
                 }
                 continue;
             }
+            let target_label = format!("{}.{}", table_def.name, col_def.name);
+            self.check_timestamp_timezone_assignment(
+                &target_label,
+                &col_def.data_type,
+                &assignment.value,
+                &value_type,
+                Some(target_span),
+            );
             self.check_value_range(
                 &table_def.name,
                 col_def,
@@ -676,6 +719,105 @@ impl Resolver<'_> {
             _ => return None,
         };
         Some(format!("{}.{}", relation.name, column.value))
+    }
+
+    fn column_label_or_name(&self, expr: &Expr) -> Option<String> {
+        if let Some(label) = self.column_label(expr) {
+            return Some(label);
+        }
+        match expr {
+            Expr::Identifier(ident) => Some(ident.value.clone()),
+            Expr::CompoundIdentifier(parts) => Some(
+                parts
+                    .iter()
+                    .map(|p| p.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join("."),
+            ),
+            Expr::Nested(inner) => self.column_label_or_name(inner),
+            _ => None,
+        }
+    }
+
+    /// Warn when comparing timestamp without time zone and timestamp with time zone (E0032)
+    fn check_timestamp_timezone_mismatch(
+        &mut self,
+        left: &Expr,
+        left_type: &ExpressionType,
+        right: &Expr,
+        right_type: &ExpressionType,
+        span: Option<Span>,
+    ) {
+        if !self.dialect.timestamp_timezone_is_session_dependent() {
+            return;
+        }
+        if !is_column_reference(left) || !is_column_reference(right) {
+            return;
+        }
+        let (ExpressionType::Known(lt), ExpressionType::Known(rt)) = (left_type, right_type) else {
+            return;
+        };
+        if !is_timestamp_timezone_mix(lt, rt) {
+            return;
+        }
+        let left_name = self
+            .column_label_or_name(left)
+            .unwrap_or_else(|| "column".to_string());
+        let right_name = self
+            .column_label_or_name(right)
+            .unwrap_or_else(|| "column".to_string());
+        let mut diag = Diagnostic::warning(
+            DiagnosticKind::TimestampTimezoneMismatch,
+            format!(
+                "Comparing column '{left_name}' ({}) with '{right_name}' ({}) depends on session TimeZone",
+                lt.display_name(),
+                rt.display_name()
+            ),
+        )
+        .with_help(
+            "Conversion between timestamp and timestamp with time zone shifts by session TimeZone. Use explicit AT TIME ZONE or CAST.",
+        );
+        diag.span = span;
+        self.diagnostics.push(diag);
+    }
+
+    /// Warn when assigning timestamp without time zone to timestamp with time zone or vice versa (E0032)
+    fn check_timestamp_timezone_assignment(
+        &mut self,
+        target_name: &str,
+        target_type: &SqlType,
+        value_expr: &Expr,
+        value_type: &ExpressionType,
+        span: Option<Span>,
+    ) {
+        if !self.dialect.timestamp_timezone_is_session_dependent() {
+            return;
+        }
+        if !is_column_reference(value_expr) {
+            return;
+        }
+        let ExpressionType::Known(vt) = value_type else {
+            return;
+        };
+        if !is_timestamp_timezone_mix(target_type, vt) {
+            return;
+        }
+        let source_name = self
+            .column_label_or_name(value_expr)
+            .unwrap_or_else(|| "column".to_string());
+        let mut diag = Diagnostic::warning(
+            DiagnosticKind::TimestampTimezoneMismatch,
+            format!(
+                "Assigning column '{source_name}' ({}) to '{target_name}' ({}) depends on session TimeZone",
+                vt.display_name(),
+                target_type.display_name()
+            ),
+        )
+        .with_help(
+            "Conversion between timestamp and timestamp with time zone shifts by session TimeZone. Use explicit AT TIME ZONE or CAST.",
+        );
+        diag.span = span;
+        self.diagnostics.push(diag);
     }
 
     pub(super) fn infer_qualified_column(
@@ -1097,6 +1239,42 @@ fn is_coercible_pair(a: &SqlType, b: &SqlType) -> bool {
 /// Whether one side is BOOLEAN and the other an integer type
 fn is_integer_boolean_pair(a: &SqlType, b: &SqlType) -> bool {
     (*a == SqlType::Boolean && b.is_integer()) || (*b == SqlType::Boolean && a.is_integer())
+}
+
+/// Whether an expression is a column reference (identifier or compound identifier),
+/// ignoring parentheses.
+fn is_column_reference(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => true,
+        Expr::Nested(inner) => is_column_reference(inner),
+        _ => false,
+    }
+}
+
+/// Whether two types are a mix of timestamp without time zone and timestamp with time zone.
+fn is_timestamp_timezone_mix(a: &SqlType, b: &SqlType) -> bool {
+    matches!(
+        (a, b),
+        (
+            SqlType::Timestamp {
+                with_timezone: false,
+                ..
+            },
+            SqlType::Timestamp {
+                with_timezone: true,
+                ..
+            }
+        ) | (
+            SqlType::Timestamp {
+                with_timezone: true,
+                ..
+            },
+            SqlType::Timestamp {
+                with_timezone: false,
+                ..
+            }
+        )
+    )
 }
 
 #[cfg(test)]

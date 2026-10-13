@@ -143,12 +143,19 @@ fn timestamptz_column_accepts_now() {
 fn timestamps_with_different_precision_or_time_zone_are_comparable() {
     for sql in [
         "SELECT id FROM users WHERE updated_at < now()",
-        "SELECT id FROM users WHERE updated_at > created_at",
         "UPDATE users SET updated_at = now() WHERE id = 1",
         "SELECT o.id FROM orders o JOIN users u ON o.placed_on = u.created_at",
     ] {
         assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
     }
+    // Column-to-column comparison mixing timestamp and timestamptz warns with E0032,
+    // but is not a type mismatch error (E0003).
+    let diags = analyze(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "SELECT id FROM users WHERE updated_at > created_at",
+    );
+    assert_eq!(kinds(&diags), [DiagnosticKind::TimestampTimezoneMismatch]);
 }
 
 #[test]
