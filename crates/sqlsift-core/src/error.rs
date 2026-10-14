@@ -213,6 +213,8 @@ pub enum DiagnosticKind {
     ForeignKeyJoinMismatch,
     /// E0031: Aggregate over a table whose rows another one-to-many join multiplies
     JoinFanOut,
+    /// E0032: Division of integer columns truncates toward zero
+    IntegerDivision,
     /// E0033: Comparing or assigning timestamp with timestamptz depends on session TimeZone
     TimestampTimezoneMismatch,
     /// Parse error
