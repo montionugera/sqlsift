@@ -373,6 +373,13 @@ pub const RULES: &[Rule] = &[
         summary: "Division of integer columns truncates toward zero",
     },
     Rule {
+        kind: DiagnosticKind::TimestampTimezoneMismatch,
+        code: "E0033",
+        name: "timestamp-timezone-mismatch",
+        category: RuleCategory::Suspicious,
+        summary: "Comparing or assigning timestamp with timestamptz depends on session TimeZone",
+    },
+    Rule {
         kind: DiagnosticKind::CaseEnumMissingLabels,
         code: "E0034",
         name: "case-enum-missing-labels",

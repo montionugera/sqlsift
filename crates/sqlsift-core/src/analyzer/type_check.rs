@@ -157,7 +157,7 @@ impl Resolver<'_> {
         ty.accepts_string_literal_in(literal, self.dialect)
     }
 
-    /// The display names of two types that can't be compared or assigned, or `None`
+    /// The display names of two types that can't be compared, or `None`
     /// if they are compatible (or either is unknown)
     fn type_conflict(
         &self,
@@ -173,6 +173,26 @@ impl Resolver<'_> {
                 if self.dialect.coerces_strings() && is_coercible_pair(lt, rt) {
                     // Snowflake converts strings (and numbers to booleans) at run time
                     return None;
+                }
+                let left_enum_def = match lt {
+                    SqlType::Custom(name) => self.catalog.get_enum(name),
+                    _ => None,
+                };
+                let right_enum_def = match rt {
+                    SqlType::Custom(name) => self.catalog.get_enum(name),
+                    _ => None,
+                };
+                if left_enum_def.is_some() || right_enum_def.is_some() {
+                    let same = match (left_enum_def, right_enum_def) {
+                        (Some(e1), Some(e2)) => std::ptr::eq(e1, e2),
+                        _ => false,
+                    };
+                    return (!same).then(|| {
+                        (
+                            lt.display_name_in(self.dialect),
+                            rt.display_name_in(self.dialect),
+                        )
+                    });
                 }
                 let compatible = lt.is_compatible_with(rt) != TypeCompatibility::ExplicitCast
                     || rt.is_compatible_with(lt) != TypeCompatibility::ExplicitCast;
@@ -201,6 +221,35 @@ impl Resolver<'_> {
             }
             _ => None,
         }
+    }
+
+    /// Whether `ty` is an enum type (either a named enum in the catalog or an inline enum)
+    fn is_enum_type(&self, ty: &SqlType) -> bool {
+        match ty {
+            SqlType::Enum(_) => true,
+            SqlType::Custom(name) => self.catalog.get_enum(name).is_some(),
+            _ => false,
+        }
+    }
+
+    /// The display names of a target column and value type that can't be assigned,
+    /// or `None` if they are compatible (or either is unknown)
+    fn assignment_conflict(
+        &self,
+        column_type: &ExpressionType,
+        value_type: &ExpressionType,
+    ) -> Option<(String, String)> {
+        if let (ExpressionType::Known(col_type), ExpressionType::Known(val_type)) =
+            (column_type, value_type)
+        {
+            // PostgreSQL accepts assigning an enum into a character string
+            // column (text, varchar, char) via an assignment cast; only the
+            // reverse or a comparison requires an explicit cast
+            if col_type.is_string() && self.is_enum_type(val_type) {
+                return None;
+            }
+        }
+        self.type_conflict(column_type, value_type)
     }
 
     /// Check a comparison's operand types (E0003)
@@ -236,7 +285,9 @@ impl Resolver<'_> {
             .with_help(help);
             diag.span = span;
             self.push_mismatch(diag);
+            return;
         }
+        self.check_timestamp_timezone_mismatch(left, &left_type, right, &right_type, span);
     }
 
     /// Check a comparison in a JOIN ... ON condition (E0007)
@@ -260,7 +311,9 @@ impl Resolver<'_> {
                     "JOIN condition should compare compatible types. Consider using explicit CAST.",
                 ),
             );
+            return;
         }
+        self.check_timestamp_timezone_mismatch(left, &left_type, right, &right_type, span);
     }
 
     /// Check `expr IN (SELECT col ...)`: the value must be comparable with the column
@@ -280,6 +333,29 @@ impl Resolver<'_> {
             .with_help("Types are not implicitly compatible. Consider using explicit CAST.");
             diag.span = located_span(expr);
             self.push_mismatch(diag);
+            return;
+        }
+        if self.dialect.timestamp_timezone_is_session_dependent() && is_column_reference(expr) {
+            if let (Some(left_col), ExpressionType::Known(vt), ExpressionType::Known(ct)) =
+                (self.column_label_or_name(expr), &value_type, &column.ty)
+            {
+                if is_timestamp_timezone_mix(vt, ct) {
+                    let mut diag = Diagnostic::warning(
+                        DiagnosticKind::TimestampTimezoneMismatch,
+                        format!(
+                            "Comparing column '{left_col}' ({}) with '{}' ({}) of the subquery depends on session TimeZone",
+                            vt.display_name(),
+                            column.name,
+                            ct.display_name()
+                        ),
+                    )
+                    .with_help(
+                        "Conversion between timestamp and timestamp with time zone shifts by session TimeZone. Use explicit AT TIME ZONE or CAST.",
+                    );
+                    diag.span = located_span(expr);
+                    self.diagnostics.push(diag);
+                }
+            }
         }
     }
 
@@ -312,11 +388,36 @@ impl Resolver<'_> {
             return None;
         }
 
+        if matches!(self.dialect, SqlDialect::PostgreSQL | SqlDialect::Redshift)
+            && matches!(
+                op,
+                BinaryOperator::StringConcat
+                    | BinaryOperator::Arrow
+                    | BinaryOperator::LongArrow
+                    | BinaryOperator::HashArrow
+                    | BinaryOperator::HashLongArrow
+            )
+        {
+            let left_type = left_type.unwrap_or_else(|| self.infer_expr_type(left));
+            let right_type = self.infer_expr_type(right);
+            return Some(binary_op_result_type(
+                self.dialect,
+                left_type,
+                op,
+                right_type,
+            ));
+        }
+
         let arith_op = arithmetic_op(op)?;
         let left_type = left_type.unwrap_or_else(|| self.infer_expr_type(left));
         let right_type = self.infer_expr_type(right);
         self.check_arithmetic(left, arith_op, right, &left_type, &right_type);
-        Some(binary_op_result_type(left_type, op, right_type))
+        Some(binary_op_result_type(
+            self.dialect,
+            left_type,
+            op,
+            right_type,
+        ))
     }
 
     /// Check the operand types of an arithmetic operation
@@ -566,7 +667,9 @@ impl Resolver<'_> {
                 ) {
                     continue;
                 }
-                if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
+                if let Some((expected, actual)) =
+                    self.assignment_conflict(&column_type, &value_type)
+                {
                     let mut diag = assignment_mismatch(col_name, &expected, &actual);
                     if let (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) =
                         (&column_type, &value_type)
@@ -595,6 +698,14 @@ impl Resolver<'_> {
                         .and_then(name_last)
                         .map(|t| Span::from_sqlparser(&t.span))
                 });
+                let target_label = format!("{}.{}", table_def.name, col_name);
+                self.check_timestamp_timezone_assignment(
+                    &target_label,
+                    &col_def.data_type,
+                    value_expr,
+                    &value_type,
+                    column_span.or_else(|| located_span(value_expr)),
+                );
                 self.check_value_range(&table_def.name, col_def, value_expr, fallback);
             }
         }
@@ -650,7 +761,7 @@ impl Resolver<'_> {
             ) {
                 continue;
             }
-            if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
+            if let Some((expected, actual)) = self.assignment_conflict(&column_type, &value_type) {
                 let mut diag = assignment_mismatch(&target.ident().value, &expected, &actual);
                 if let (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) =
                     (&column_type, &value_type)
@@ -674,6 +785,14 @@ impl Resolver<'_> {
                 }
                 continue;
             }
+            let target_label = format!("{}.{}", table_def.name, col_def.name);
+            self.check_timestamp_timezone_assignment(
+                &target_label,
+                &col_def.data_type,
+                &assignment.value,
+                &value_type,
+                Some(target_span),
+            );
             self.check_value_range(
                 &table_def.name,
                 col_def,
@@ -721,6 +840,10 @@ impl Resolver<'_> {
                 }
             }
             Expr::Interval(_) => ExpressionType::Known(SqlType::Interval),
+            Expr::Extract { .. } => ExpressionType::Known(SqlType::Decimal {
+                precision: None,
+                scale: None,
+            }),
             Expr::Case {
                 conditions,
                 else_result,
@@ -769,6 +892,105 @@ impl Resolver<'_> {
         Some(format!("{}.{}", relation.name, column.value))
     }
 
+    fn column_label_or_name(&self, expr: &Expr) -> Option<String> {
+        if let Some(label) = self.column_label(expr) {
+            return Some(label);
+        }
+        match expr {
+            Expr::Identifier(ident) => Some(ident.value.clone()),
+            Expr::CompoundIdentifier(parts) => Some(
+                parts
+                    .iter()
+                    .map(|p| p.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join("."),
+            ),
+            Expr::Nested(inner) => self.column_label_or_name(inner),
+            _ => None,
+        }
+    }
+
+    /// Warn when comparing timestamp without time zone and timestamp with time zone (E0033)
+    fn check_timestamp_timezone_mismatch(
+        &mut self,
+        left: &Expr,
+        left_type: &ExpressionType,
+        right: &Expr,
+        right_type: &ExpressionType,
+        span: Option<Span>,
+    ) {
+        if !self.dialect.timestamp_timezone_is_session_dependent() {
+            return;
+        }
+        if !is_column_reference(left) || !is_column_reference(right) {
+            return;
+        }
+        let (ExpressionType::Known(lt), ExpressionType::Known(rt)) = (left_type, right_type) else {
+            return;
+        };
+        if !is_timestamp_timezone_mix(lt, rt) {
+            return;
+        }
+        let left_name = self
+            .column_label_or_name(left)
+            .unwrap_or_else(|| "column".to_string());
+        let right_name = self
+            .column_label_or_name(right)
+            .unwrap_or_else(|| "column".to_string());
+        let mut diag = Diagnostic::warning(
+            DiagnosticKind::TimestampTimezoneMismatch,
+            format!(
+                "Comparing column '{left_name}' ({}) with '{right_name}' ({}) depends on session TimeZone",
+                lt.display_name(),
+                rt.display_name()
+            ),
+        )
+        .with_help(
+            "Conversion between timestamp and timestamp with time zone shifts by session TimeZone. Use explicit AT TIME ZONE or CAST.",
+        );
+        diag.span = span;
+        self.diagnostics.push(diag);
+    }
+
+    /// Warn when assigning timestamp without time zone to timestamp with time zone or vice versa (E0033)
+    fn check_timestamp_timezone_assignment(
+        &mut self,
+        target_name: &str,
+        target_type: &SqlType,
+        value_expr: &Expr,
+        value_type: &ExpressionType,
+        span: Option<Span>,
+    ) {
+        if !self.dialect.timestamp_timezone_is_session_dependent() {
+            return;
+        }
+        if !is_column_reference(value_expr) {
+            return;
+        }
+        let ExpressionType::Known(vt) = value_type else {
+            return;
+        };
+        if !is_timestamp_timezone_mix(target_type, vt) {
+            return;
+        }
+        let source_name = self
+            .column_label_or_name(value_expr)
+            .unwrap_or_else(|| "column".to_string());
+        let mut diag = Diagnostic::warning(
+            DiagnosticKind::TimestampTimezoneMismatch,
+            format!(
+                "Assigning column '{source_name}' ({}) to '{target_name}' ({}) depends on session TimeZone",
+                vt.display_name(),
+                target_type.display_name()
+            ),
+        )
+        .with_help(
+            "Conversion between timestamp and timestamp with time zone shifts by session TimeZone. Use explicit AT TIME ZONE or CAST.",
+        );
+        diag.span = span;
+        self.diagnostics.push(diag);
+    }
+
     pub(super) fn infer_qualified_column(
         &self,
         schema: Option<&sqlparser::ast::Ident>,
@@ -811,6 +1033,10 @@ impl Resolver<'_> {
         let func_name = func.name.to_string().to_uppercase();
         // Strip schema prefix (e.g., "PG_CATALOG.COUNT" → "COUNT")
         let name = func_name.rsplit('.').next().unwrap_or(&func_name);
+        if self.catalog.user_functions.contains(&name.to_lowercase()) {
+            return ExpressionType::Unknown;
+        }
+
         if self.dialect == SqlDialect::BigQuery {
             if let Some(ty) = self.bigquery_function_type(name, func) {
                 return ty;
@@ -871,7 +1097,21 @@ impl Resolver<'_> {
             // String functions
             "CONCAT" | "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "REPLACE" | "SUBSTRING"
             | "SUBSTR" | "LEFT" | "RIGHT" | "LPAD" | "RPAD" | "REPEAT" | "REVERSE" | "INITCAP"
-            | "MD5" => ExpressionType::Known(SqlType::Text),
+            | "MD5" | "SPLIT_PART" | "FORMAT" | "REGEXP_REPLACE" | "REGEXP_SUBSTR" | "BTRIM"
+            | "CHR" | "CONCAT_WS" | "TRANSLATE" | "TO_CHAR" => ExpressionType::Known(SqlType::Text),
+            "STRING_AGG" => {
+                let args = unnamed_args(func);
+                match args.first().map(|e| self.infer_expr_type(e)) {
+                    Some(ExpressionType::Known(SqlType::Bytea)) => {
+                        ExpressionType::Known(SqlType::Bytea)
+                    }
+                    Some(ExpressionType::Known(t)) if t.is_string() => {
+                        ExpressionType::Known(SqlType::Text)
+                    }
+                    Some(ExpressionType::StringLiteral(_)) => ExpressionType::Known(SqlType::Text),
+                    _ => ExpressionType::Unknown,
+                }
+            }
 
             // String → Integer functions
             "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "BIT_LENGTH" | "OCTET_LENGTH"
@@ -884,15 +1124,52 @@ impl Resolver<'_> {
             }
 
             // Date/Time functions
-            "NOW" | "CURRENT_TIMESTAMP" => ExpressionType::Known(SqlType::Timestamp {
+            "NOW" | "CURRENT_TIMESTAMP" | "TO_TIMESTAMP" | "MAKE_TIMESTAMPTZ" => {
+                ExpressionType::Known(SqlType::Timestamp {
+                    precision: None,
+                    with_timezone: true,
+                })
+            }
+            "MAKE_TIMESTAMP" | "LOCALTIMESTAMP" => ExpressionType::Known(SqlType::Timestamp {
                 precision: None,
-                with_timezone: true,
+                with_timezone: false,
             }),
-            "CURRENT_DATE" => ExpressionType::Known(SqlType::Date),
+            "CURRENT_DATE" | "TO_DATE" | "MAKE_DATE" => ExpressionType::Known(SqlType::Date),
             "CURRENT_TIME" => ExpressionType::Known(SqlType::Time {
                 precision: None,
                 with_timezone: true,
             }),
+            "MAKE_TIME" | "LOCALTIME" => ExpressionType::Known(SqlType::Time {
+                precision: None,
+                with_timezone: false,
+            }),
+            "AGE" | "MAKE_INTERVAL" => ExpressionType::Known(SqlType::Interval),
+            "DATE_PART" => ExpressionType::Known(SqlType::DoublePrecision),
+            "EXTRACT" => ExpressionType::Known(SqlType::Decimal {
+                precision: None,
+                scale: None,
+            }),
+            "DATE_TRUNC" => {
+                let args = unnamed_args(func);
+                match args.get(1).map(|e| self.infer_expr_type(e)) {
+                    Some(ExpressionType::Known(SqlType::Interval)) => {
+                        ExpressionType::Known(SqlType::Interval)
+                    }
+                    Some(ExpressionType::Known(SqlType::Timestamp { with_timezone, .. })) => {
+                        ExpressionType::Known(SqlType::Timestamp {
+                            precision: None,
+                            with_timezone,
+                        })
+                    }
+                    Some(ExpressionType::Known(SqlType::Date)) => {
+                        ExpressionType::Known(SqlType::Timestamp {
+                            precision: None,
+                            with_timezone: true,
+                        })
+                    }
+                    _ => ExpressionType::Unknown,
+                }
+            }
 
             _ => ExpressionType::Unknown,
         }
@@ -1034,7 +1311,7 @@ impl Resolver<'_> {
         }
         let mut ty = self.infer_expr_type(leftmost);
         for (op, right) in chain.into_iter().rev() {
-            ty = binary_op_result_type(ty, op, self.infer_expr_type(right));
+            ty = binary_op_result_type(self.dialect, ty, op, self.infer_expr_type(right));
         }
         ty
     }
@@ -1054,12 +1331,62 @@ fn unnamed_args(func: &sqlparser::ast::Function) -> Vec<&Expr> {
         .collect()
 }
 
+fn is_string_operand(ty: &ExpressionType) -> bool {
+    match ty {
+        ExpressionType::Known(t) => t.is_string(),
+        ExpressionType::StringLiteral(_) => true,
+        ExpressionType::Unknown => false,
+    }
+}
+
 /// Result type of a binary operation on operands of the given types
 fn binary_op_result_type(
+    dialect: SqlDialect,
     left: ExpressionType,
     op: &BinaryOperator,
     right: ExpressionType,
 ) -> ExpressionType {
+    if matches!(dialect, SqlDialect::PostgreSQL | SqlDialect::Redshift) {
+        match op {
+            BinaryOperator::LongArrow | BinaryOperator::HashLongArrow => {
+                return ExpressionType::Known(SqlType::Text);
+            }
+            BinaryOperator::Arrow | BinaryOperator::HashArrow => {
+                return match left {
+                    ExpressionType::Known(t @ (SqlType::Json | SqlType::Jsonb)) => {
+                        ExpressionType::Known(t)
+                    }
+                    _ => ExpressionType::Unknown,
+                };
+            }
+            BinaryOperator::StringConcat => {
+                return match (&left, &right) {
+                    (ExpressionType::Known(lt @ (SqlType::Array(_) | SqlType::Jsonb)), _) => {
+                        ExpressionType::Known(lt.clone())
+                    }
+                    (_, ExpressionType::Known(rt @ (SqlType::Array(_) | SqlType::Jsonb))) => {
+                        ExpressionType::Known(rt.clone())
+                    }
+                    (
+                        ExpressionType::Known(SqlType::Bytea),
+                        ExpressionType::Known(SqlType::Bytea),
+                    ) => ExpressionType::Known(SqlType::Bytea),
+                    (ExpressionType::Known(SqlType::Bytea), _)
+                    | (_, ExpressionType::Known(SqlType::Bytea)) => ExpressionType::Unknown,
+                    (l, r)
+                        if (is_string_operand(l) || is_string_operand(r))
+                            && !matches!(l, ExpressionType::Unknown)
+                            && !matches!(r, ExpressionType::Unknown) =>
+                    {
+                        ExpressionType::Known(SqlType::Text)
+                    }
+                    _ => ExpressionType::Unknown,
+                };
+            }
+            _ => {}
+        }
+    }
+
     match (left, right) {
         // Comparisons and logical operators over known operands are boolean
         (ExpressionType::Known(_), ExpressionType::Known(_))
@@ -1188,6 +1515,42 @@ fn is_coercible_pair(a: &SqlType, b: &SqlType) -> bool {
 /// Whether one side is BOOLEAN and the other an integer type
 fn is_integer_boolean_pair(a: &SqlType, b: &SqlType) -> bool {
     (*a == SqlType::Boolean && b.is_integer()) || (*b == SqlType::Boolean && a.is_integer())
+}
+
+/// Whether an expression is a column reference (identifier or compound identifier),
+/// ignoring parentheses.
+fn is_column_reference(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => true,
+        Expr::Nested(inner) => is_column_reference(inner),
+        _ => false,
+    }
+}
+
+/// Whether two types are a mix of timestamp without time zone and timestamp with time zone.
+fn is_timestamp_timezone_mix(a: &SqlType, b: &SqlType) -> bool {
+    matches!(
+        (a, b),
+        (
+            SqlType::Timestamp {
+                with_timezone: false,
+                ..
+            },
+            SqlType::Timestamp {
+                with_timezone: true,
+                ..
+            }
+        ) | (
+            SqlType::Timestamp {
+                with_timezone: true,
+                ..
+            },
+            SqlType::Timestamp {
+                with_timezone: false,
+                ..
+            }
+        )
+    )
 }
 
 /// Whether an expression references a column or an aggregate function

@@ -61,6 +61,7 @@
   - [E0030 foreign-key-join-mismatch](rules/E0030.md)
   - [E0031 join-fan-out](rules/E0031.md)
   - [E0032 integer-division](rules/E0032.md)
+  - [E0033 timestamp-timezone-mismatch](rules/E0033.md)
   - [E0034 case-enum-missing-labels](rules/E0034.md)
   - [E1000 parse-error](rules/E1000.md)
 

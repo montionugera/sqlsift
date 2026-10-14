@@ -185,6 +185,12 @@ impl SqlDialect {
         matches!(self, SqlDialect::PostgreSQL | SqlDialect::Redshift)
     }
 
+    /// Whether implicit conversions between TIMESTAMP (without time zone) and
+    /// TIMESTAMPTZ (with time zone) depend on the session's active TimeZone setting.
+    pub fn timestamp_timezone_is_session_dependent(self) -> bool {
+        matches!(self, SqlDialect::PostgreSQL | SqlDialect::Redshift)
+    }
+
     /// A positional bind parameter placeholder
     pub(crate) fn bind_parameter(self) -> &'static str {
         match self {

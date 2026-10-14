@@ -48,7 +48,7 @@ fn division_codes(sql: &str) -> Vec<&'static str> {
 
 const PG_SCHEMA: &str = "
 CREATE TYPE order_status AS ENUM ('pending', 'paid', 'shipped', 'cancelled');
-CREATE TABLE orders (id INT PRIMARY KEY, status order_status NOT NULL);
+CREATE TABLE orders (id INT PRIMARY KEY, status order_status NOT NULL, prev_status order_status);
 ";
 
 const MYSQL_SCHEMA: &str = "
@@ -395,7 +395,7 @@ fn e0034_silent_on_non_literal_when() {
 
     // Searched CASE comparing with another column WHEN status = other_col
     assert_eq!(
-        codes("SELECT CASE WHEN status = 'pending' THEN '1' WHEN status = id THEN '2' END FROM orders"),
+        codes("SELECT CASE WHEN status = 'pending' THEN '1' WHEN status = prev_status THEN '2' END FROM orders"),
         Vec::<&str>::new()
     );
 

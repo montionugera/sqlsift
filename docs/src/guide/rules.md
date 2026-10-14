@@ -39,6 +39,7 @@ E0029  implicit-conversion       suspicious   warn     Type mismatch MySQL or SQ
 E0030  foreign-key-join-mismatch suspicious   warn     JOIN condition doesn't follow the foreign key between the tables
 E0031  join-fan-out              suspicious   warn     Aggregate over rows that another one-to-many join multiplies
 E0032  integer-division          pedantic     off      Division of integer columns truncates toward zero
+E0033  timestamp-timezone-mismatch suspicious warn     Comparing or assigning timestamp with timestamptz depends on session TimeZone
 E0034  case-enum-missing-labels  pedantic     off      CASE over an enum column misses some labels and has no ELSE
 E1000  parse-error               correctness  error    SQL could not be parsed
 ```
