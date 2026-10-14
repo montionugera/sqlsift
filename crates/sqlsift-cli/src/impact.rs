@@ -13,8 +13,8 @@ use crate::args::OutputFormat;
 use crate::config::Config;
 use crate::output::{self, FileDiagnostics, OutputFormatter};
 use crate::{
-    analyze_files, build_catalog, collect_query_files, expand_glob, is_glob, load_dbt_catalogs,
-    load_dbt_vars, read_query_file, QueryFiles, QueryOptions,
+    analyze_files, build_catalog_from_sources, collect_query_files, expand_glob, is_glob,
+    load_dbt_catalogs, load_dbt_vars, read_query_file, QueryFiles, QueryOptions, SchemaSource,
 };
 
 /// What `sqlsift impact` runs with, besides the configuration
@@ -32,8 +32,8 @@ pub struct ImpactOptions<'a> {
 /// The schema files before and after the migrations
 #[derive(Debug, PartialEq)]
 struct SchemaVersions {
-    before: Vec<PathBuf>,
-    after: Vec<PathBuf>,
+    before: Vec<SchemaSource>,
+    after: Vec<SchemaSource>,
 }
 
 /// Split the schema files at the migrations: "before" stops at the first
@@ -47,15 +47,79 @@ fn schema_versions(schema_files: &[PathBuf], migrations: &[PathBuf]) -> SchemaVe
         .iter()
         .position(|k| migration_keys.contains(k))
         .unwrap_or(schema_files.len());
-    let mut after = schema_files.to_vec();
+    let mut after: Vec<SchemaSource> = schema_files.iter().map(SchemaSource::from).collect();
     for (migration, k) in migrations.iter().zip(&migration_keys) {
-        if !schema_keys.contains(k) && !after.iter().any(|p| key(p) == *k) {
-            after.push(migration.clone());
+        if !schema_keys.contains(k) && !after.iter().any(|p| key(&p.path) == *k) {
+            after.push(migration.into());
         }
     }
     SchemaVersions {
-        before: schema_files[..first].to_vec(),
+        before: schema_files[..first]
+            .iter()
+            .map(SchemaSource::from)
+            .collect(),
         after,
+    }
+}
+
+/// Split the schema files when `--base` is used: schema files modified in place
+/// are loaded from git at the merge base revision for "before", while newly
+/// added files are left out of "before".
+fn schema_versions_with_base(
+    schema_files: &[PathBuf],
+    migrations: &[PathBuf],
+    base: &str,
+) -> Result<SchemaVersions> {
+    let toplevel = git(&["rev-parse", "--show-toplevel"])?;
+    let root = fs::canonicalize(PathBuf::from(toplevel.trim_end()))
+        .unwrap_or_else(|_| PathBuf::from(toplevel.trim_end()));
+    let merge_base = git(&["merge-base", base, "HEAD"]).unwrap_or_else(|_| base.to_string());
+    let merge_base = merge_base.trim();
+
+    let key = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let schema_keys: Vec<PathBuf> = schema_files.iter().map(|p| key(p)).collect();
+    let migration_keys: Vec<PathBuf> = migrations.iter().map(|p| key(p)).collect();
+
+    let mut after: Vec<SchemaSource> = schema_files.iter().map(SchemaSource::from).collect();
+    for (migration, k) in migrations.iter().zip(&migration_keys) {
+        if !schema_keys.contains(k) && !after.iter().any(|p| key(&p.path) == *k) {
+            after.push(migration.into());
+        }
+    }
+
+    let mut before: Vec<SchemaSource> = Vec::new();
+    for source in &after {
+        let k = key(&source.path);
+        if migration_keys.contains(&k) {
+            if let Some(content) = git_show(&root, merge_base, &source.path) {
+                before.push(SchemaSource {
+                    path: source.path.clone(),
+                    content: Some(content),
+                });
+            }
+        } else {
+            before.push(source.clone());
+        }
+    }
+
+    Ok(SchemaVersions { before, after })
+}
+
+/// Retrieve the content of a file at a specific git revision
+fn git_show(root: &Path, rev: &str, path: &Path) -> Option<String> {
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let rel = canonical.strip_prefix(root).ok()?;
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    let target = format!("{rev}:{rel_str}");
+    let output = std::process::Command::new("git")
+        .args(["show", &target])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        None
     }
 }
 
@@ -154,11 +218,15 @@ pub fn run(config: &Config, options: &ImpactOptions) -> Result<bool> {
         }
     }
     sqlsift_core::schema::sort_migration_files(&mut migrations);
-    let versions = schema_versions(&schema_files, &migrations);
+    let versions = if let Some(base) = options.base {
+        schema_versions_with_base(&schema_files, &migrations, base)?
+    } else {
+        schema_versions(&schema_files, &migrations)
+    };
 
     let mut catalogs: Vec<Catalog> = Vec::with_capacity(2);
-    for (files, warn) in [(&versions.before, false), (&versions.after, true)] {
-        let mut catalog = match build_catalog(files, dialect, warn)? {
+    for (sources, warn) in [(&versions.before, false), (&versions.after, true)] {
+        let mut catalog = match build_catalog_from_sources(sources, dialect, warn)? {
             Ok(catalog) => catalog,
             Err(failed) => {
                 formatter.print(&[failed]);
@@ -449,23 +517,27 @@ mod tests {
         names.iter().map(PathBuf::from).collect()
     }
 
+    fn sources(names: &[&str]) -> Vec<SchemaSource> {
+        names.iter().map(|n| PathBuf::from(n).into()).collect()
+    }
+
     #[test]
     fn migration_among_schema_files() {
         let versions = schema_versions(
             &paths(&["m/001.sql", "m/002.sql", "m/003.sql"]),
             &paths(&["m/002.sql"]),
         );
-        assert_eq!(versions.before, paths(&["m/001.sql"]));
+        assert_eq!(versions.before, sources(&["m/001.sql"]));
         assert_eq!(
             versions.after,
-            paths(&["m/001.sql", "m/002.sql", "m/003.sql"])
+            sources(&["m/001.sql", "m/002.sql", "m/003.sql"])
         );
     }
 
     #[test]
     fn migration_outside_schema_files() {
         let versions = schema_versions(&paths(&["schema.sql"]), &paths(&["new/004.sql"]));
-        assert_eq!(versions.before, paths(&["schema.sql"]));
-        assert_eq!(versions.after, paths(&["schema.sql", "new/004.sql"]));
+        assert_eq!(versions.before, sources(&["schema.sql"]));
+        assert_eq!(versions.after, sources(&["schema.sql", "new/004.sql"]));
     }
 }

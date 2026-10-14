@@ -552,21 +552,50 @@ fn load_dbt_catalogs(catalog: &mut Catalog, files: &[DbtCatalogFile]) -> Result<
 }
 
 /// Build the catalog from the schema files. Schema warnings are printed to
+/// A schema file input with optional pre-loaded content (e.g. from git history)
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SchemaSource {
+    pub path: PathBuf,
+    pub content: Option<String>,
+}
+
+impl From<PathBuf> for SchemaSource {
+    fn from(path: PathBuf) -> Self {
+        Self {
+            path,
+            content: None,
+        }
+    }
+}
+
+impl From<&PathBuf> for SchemaSource {
+    fn from(path: &PathBuf) -> Self {
+        Self {
+            path: path.clone(),
+            content: None,
+        }
+    }
+}
+
+/// Build the schema catalog from schema sources, printing schema warnings to
 /// stderr (unless `!warn`); a file with errors is returned with its diagnostics
 /// instead.
-fn build_catalog(
-    schema_files: &[PathBuf],
+pub(crate) fn build_catalog_from_sources(
+    sources: &[SchemaSource],
     dialect: SqlDialect,
     warn: bool,
 ) -> Result<std::result::Result<Catalog, FileDiagnostics>> {
     let mut builder = SchemaBuilder::with_dialect(dialect);
-    for schema_file in schema_files {
-        let content = read_file(schema_file)?;
+    for source in sources {
+        let content = match &source.content {
+            Some(text) => text.clone(),
+            None => read_file(&source.path)?,
+        };
         if let Err(diags) =
-            with_analysis_stack(|| builder.parse_file(&content, &schema_file.display().to_string()))
+            with_analysis_stack(|| builder.parse_file(&content, &source.path.display().to_string()))
         {
             return Ok(Err(FileDiagnostics {
-                file: schema_file.display().to_string(),
+                file: source.path.display().to_string(),
                 source: content,
                 diagnostics: diags,
                 ..FileDiagnostics::default()
@@ -585,6 +614,18 @@ fn build_catalog(
         }
     }
     Ok(Ok(catalog))
+}
+
+/// Build the schema catalog from schema files, printing schema warnings to
+/// stderr (unless `!warn`); a file with errors is returned with its diagnostics
+/// instead.
+fn build_catalog(
+    schema_files: &[PathBuf],
+    dialect: SqlDialect,
+    warn: bool,
+) -> Result<std::result::Result<Catalog, FileDiagnostics>> {
+    let sources: Vec<SchemaSource> = schema_files.iter().map(SchemaSource::from).collect();
+    build_catalog_from_sources(&sources, dialect, warn)
 }
 
 /// The query files to analyze, and their templating (same order)
