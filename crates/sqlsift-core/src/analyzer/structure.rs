@@ -618,6 +618,13 @@ impl Resolver<'_> {
         table_def: &TableDef,
         rows: &[Parens<Vec<Expr>>],
     ) {
+        if !matches!(
+            self.dialect,
+            SqlDialect::PostgreSQL | SqlDialect::MySQL | SqlDialect::SQLite
+        ) {
+            return;
+        }
+
         if rows.len() < 2 {
             return;
         }
@@ -675,21 +682,27 @@ impl Resolver<'_> {
         // Gather candidate unique keys deduplicated so a column that is both
         // PRIMARY KEY and UNIQUE is only checked once
         let mut candidate_keys: Vec<CandidateKey> = Vec::new();
-        let pk_cols = Self::table_primary_key(table_def);
-        let pk_name = table_def
+        let pk_deferrable = table_def
             .primary_key
             .as_ref()
-            .and_then(|pk| pk.name.clone());
-        if !pk_cols.is_empty() {
-            candidate_keys.push(CandidateKey {
-                is_primary_key: true,
-                constraint_name: pk_name,
-                columns: pk_cols,
-            });
+            .is_some_and(|pk| pk.deferrable);
+        if !pk_deferrable {
+            let pk_cols = Self::table_primary_key(table_def);
+            let pk_name = table_def
+                .primary_key
+                .as_ref()
+                .and_then(|pk| pk.name.clone());
+            if !pk_cols.is_empty() {
+                candidate_keys.push(CandidateKey {
+                    is_primary_key: true,
+                    constraint_name: pk_name,
+                    columns: pk_cols,
+                });
+            }
         }
 
         for uc in &table_def.unique_constraints {
-            if uc.columns.is_empty() {
+            if uc.deferrable || uc.columns.is_empty() {
                 continue;
             }
             if candidate_keys
@@ -758,8 +771,21 @@ impl Resolver<'_> {
                 let mut key_vals = Vec::with_capacity(col_indices.len());
                 let mut all_literals = true;
 
-                for &idx in &col_indices {
-                    if let Some(val) = extract_literal_key_value(&row[idx]) {
+                for (key_col_idx, &idx) in col_indices.iter().enumerate() {
+                    let col_name = &key.columns[key_col_idx];
+                    if let Some(val) = extract_literal_key_value(&row[idx], self.dialect) {
+                        if self.dialect == SqlDialect::MySQL
+                            && (matches!(&val, LiteralKeyValue::Integer(0))
+                                || matches!(&val, LiteralKeyValue::Number(n) if n == "0"))
+                            && table_def
+                                .get_column(col_name)
+                                .is_some_and(|c| c.auto_increment)
+                        {
+                            // In MySQL, inserting 0 into an AUTO_INCREMENT column acts like NULL
+                            // (generates a new id), so it does not conflict with other rows.
+                            all_literals = false;
+                            break;
+                        }
                         key_vals.push(val);
                     } else {
                         all_literals = false;
@@ -1328,7 +1354,7 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-fn extract_literal_key_value(expr: &Expr) -> Option<LiteralKeyValue> {
+fn extract_literal_key_value(expr: &Expr, dialect: SqlDialect) -> Option<LiteralKeyValue> {
     match expr {
         Expr::Value(ValueWithSpan { value, .. }) => match value {
             Value::Number(n, _) => {
@@ -1342,14 +1368,18 @@ fn extract_literal_key_value(expr: &Expr) -> Option<LiteralKeyValue> {
             | Value::DoubleQuotedString(s)
             | Value::NationalStringLiteral(s) => Some(LiteralKeyValue::String(s.clone())),
             Value::HexStringLiteral(s) => {
-                if let Some(bytes) = decode_hex(s) {
-                    if let Ok(decoded) = String::from_utf8(bytes.clone()) {
-                        Some(LiteralKeyValue::String(decoded))
+                if dialect == SqlDialect::MySQL {
+                    if let Some(bytes) = decode_hex(s) {
+                        if let Ok(decoded) = String::from_utf8(bytes.clone()) {
+                            Some(LiteralKeyValue::String(decoded))
+                        } else {
+                            Some(LiteralKeyValue::Bytes(bytes))
+                        }
                     } else {
-                        Some(LiteralKeyValue::Bytes(bytes))
+                        Some(LiteralKeyValue::Bytes(s.as_bytes().to_vec()))
                     }
                 } else {
-                    Some(LiteralKeyValue::Bytes(s.as_bytes().to_vec()))
+                    None
                 }
             }
             Value::Boolean(b) => Some(LiteralKeyValue::Boolean(*b)),
@@ -1358,7 +1388,7 @@ fn extract_literal_key_value(expr: &Expr) -> Option<LiteralKeyValue> {
         Expr::UnaryOp {
             op: UnaryOperator::Minus,
             expr,
-        } => match extract_literal_key_value(expr)? {
+        } => match extract_literal_key_value(expr, dialect)? {
             LiteralKeyValue::Integer(i) => Some(LiteralKeyValue::Integer(-i)),
             LiteralKeyValue::Number(n) => Some(LiteralKeyValue::Number(format!("-{n}"))),
             _ => None,
@@ -1366,8 +1396,8 @@ fn extract_literal_key_value(expr: &Expr) -> Option<LiteralKeyValue> {
         Expr::UnaryOp {
             op: UnaryOperator::Plus,
             expr,
-        } => extract_literal_key_value(expr),
-        Expr::Nested(inner) => extract_literal_key_value(inner),
+        } => extract_literal_key_value(expr, dialect),
+        Expr::Nested(inner) => extract_literal_key_value(inner, dialect),
         _ => None,
     }
 }

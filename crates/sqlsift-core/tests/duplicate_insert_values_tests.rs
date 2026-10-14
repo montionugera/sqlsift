@@ -233,3 +233,88 @@ fn e0035_diagnostics_message_content() {
     assert!(diags[0].message.contains("Duplicate primary key value 1"));
     assert!(diags[0].message.contains("table 'users'"));
 }
+
+#[test]
+fn e0035_dialect_gating() {
+    // Redshift, Snowflake, BigQuery, Databricks don't enforce primary or unique keys: stay quiet
+    assert_eq!(
+        codes_in(
+            SqlDialect::Redshift,
+            "INSERT INTO users (id, email) VALUES (1, 'a@x'), (1, 'b@x')"
+        ),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        codes_in(
+            SqlDialect::Snowflake,
+            "INSERT INTO users (id, email) VALUES (1, 'a@x'), (1, 'b@x')"
+        ),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        codes_in(
+            SqlDialect::BigQuery,
+            "INSERT INTO users (id, email) VALUES (1, 'a@x'), (1, 'b@x')"
+        ),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        codes_in(
+            SqlDialect::Databricks,
+            "INSERT INTO users (id, email) VALUES (1, 'a@x'), (1, 'b@x')"
+        ),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
+fn e0035_hex_literals_non_mysql() {
+    // In PostgreSQL and SQLite, X'41' is a bit string / blob and not text 'A'.
+    // They do not collide: clean
+    assert_clean("INSERT INTO users (id, email) VALUES (1, X'41'), (2, 'A')");
+    assert_eq!(
+        codes_in(
+            SqlDialect::SQLite,
+            "INSERT INTO users (id, email) VALUES (1, X'41'), (2, 'A')"
+        ),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
+fn e0035_mysql_auto_increment_zero_is_clean() {
+    let schema = "CREATE TABLE items (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT);";
+    let mut builder = SchemaBuilder::with_dialect(SqlDialect::MySQL);
+    builder.parse(schema).expect("schema parses");
+    let catalog = builder.build().0;
+    let mut analyzer = Analyzer::with_dialect(&catalog, SqlDialect::MySQL);
+
+    // In MySQL, inserting 0 into an AUTO_INCREMENT column generates new ids (acts like NULL)
+    let diags = analyzer.analyze("INSERT INTO items (id, name) VALUES (0, 'x'), (0, 'y')");
+    assert_eq!(diags.len(), 0);
+
+    // Inserting identical non-zero values still reports duplicate
+    let diags = analyzer.analyze("INSERT INTO items (id, name) VALUES (1, 'x'), (1, 'y')");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code(), "E0035");
+}
+
+#[test]
+fn e0035_deferrable_initially_deferred_keys_skipped() {
+    let schema = "
+CREATE TABLE def_pk (id INT CONSTRAINT pk_def PRIMARY KEY DEFERRABLE INITIALLY DEFERRED, val TEXT);
+CREATE TABLE def_uq (id INT, val TEXT, CONSTRAINT uq_def UNIQUE (val) DEFERRABLE INITIALLY DEFERRED);
+";
+    let mut builder = SchemaBuilder::with_dialect(SqlDialect::PostgreSQL);
+    builder.parse(schema).expect("schema parses");
+    let catalog = builder.build().0;
+    let mut analyzer = Analyzer::with_dialect(&catalog, SqlDialect::PostgreSQL);
+
+    // DEFERRABLE INITIALLY DEFERRED primary key: skipped
+    let diags = analyzer.analyze("INSERT INTO def_pk (id, val) VALUES (1, 'a'), (1, 'b')");
+    assert_eq!(diags.len(), 0);
+
+    // DEFERRABLE INITIALLY DEFERRED unique constraint: skipped
+    let diags = analyzer.analyze("INSERT INTO def_uq (id, val) VALUES (1, 'x'), (2, 'x')");
+    assert_eq!(diags.len(), 0);
+}

@@ -872,6 +872,7 @@ impl SchemaBuilder {
                 table.unique_constraints.push(UniqueConstraintDef {
                     name: index_name,
                     columns,
+                    deferrable: false,
                 });
             }
             _ => table.unknown_unique_keys = true,
@@ -1431,9 +1432,11 @@ impl SchemaBuilder {
     fn process_table_constraint(&mut self, table: &mut TableDef, constraint: &TableConstraint) {
         match constraint {
             TableConstraint::PrimaryKey(pk) => {
+                let deferrable = is_deferrable(pk.characteristics.as_ref());
                 let pk = PrimaryKeyDef {
                     name: pk.name.as_ref().map(|n| n.value.clone()),
                     columns: pk.columns.iter().map(index_column_name).collect(),
+                    deferrable,
                 };
                 // Mark columns as primary key
                 for col_name in &pk.columns {
@@ -1459,9 +1462,11 @@ impl SchemaBuilder {
                 table.foreign_keys.push(fk);
             }
             TableConstraint::Unique(unique) => {
+                let deferrable = is_deferrable(unique.characteristics.as_ref());
                 let unique = UniqueConstraintDef {
                     name: unique.name.as_ref().map(|n| n.value.clone()),
                     columns: unique.columns.iter().map(index_column_name).collect(),
+                    deferrable,
                 };
                 table.unique_constraints.push(unique);
             }
@@ -1498,6 +1503,13 @@ impl Default for SchemaBuilder {
     }
 }
 
+fn is_deferrable(characteristics: Option<&sqlparser::ast::ConstraintCharacteristics>) -> bool {
+    let Some(c) = characteristics else {
+        return false;
+    };
+    c.deferrable == Some(true) || c.initially == Some(sqlparser::ast::DeferrableInitial::Deferred)
+}
+
 /// Build a column definition from its name, type and options. Table-level
 /// constraints declared inline (PRIMARY KEY, UNIQUE, REFERENCES, CHECK) are
 /// collected into the returned `TableDef`, to be merged into the owning table.
@@ -1518,18 +1530,22 @@ fn build_column(
             ColumnOption::Null => col.nullable = true,
             ColumnOption::NotNull => col.nullable = false,
             ColumnOption::Default(expr) => col.default = Some(expr_to_default(expr)),
-            ColumnOption::PrimaryKey(_) => {
+            ColumnOption::PrimaryKey(pk) => {
                 col.is_primary_key = true;
                 col.nullable = false;
+                let deferrable = is_deferrable(pk.characteristics.as_ref());
                 constraints.primary_key = Some(PrimaryKeyDef {
                     name: constraint_name,
                     columns: vec![col_name.to_string()],
+                    deferrable,
                 });
             }
-            ColumnOption::Unique(_) => {
+            ColumnOption::Unique(unique) => {
+                let deferrable = is_deferrable(unique.characteristics.as_ref());
                 constraints.unique_constraints.push(UniqueConstraintDef {
                     name: constraint_name,
                     columns: vec![col_name.to_string()],
+                    deferrable,
                 });
             }
             ColumnOption::ForeignKey(fk) => {

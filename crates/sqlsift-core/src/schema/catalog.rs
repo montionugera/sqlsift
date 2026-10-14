@@ -943,6 +943,8 @@ pub enum DefaultValue {
 pub struct PrimaryKeyDef {
     pub name: Option<String>,
     pub columns: Vec<String>,
+    #[serde(default)]
+    pub deferrable: bool,
 }
 
 /// Foreign key constraint
@@ -959,6 +961,8 @@ pub struct ForeignKeyDef {
 pub struct UniqueConstraintDef {
     pub name: Option<String>,
     pub columns: Vec<String>,
+    #[serde(default)]
+    pub deferrable: bool,
 }
 
 /// CHECK constraint
