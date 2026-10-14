@@ -169,9 +169,25 @@ impl SqlDialect {
         matches!(self, SqlDialect::BigQuery | SqlDialect::Databricks)
     }
 
+    /// Whether `/` between two integers performs integer division (truncating toward zero).
+    /// In PostgreSQL, SQLite and Redshift, `1 / 2` evaluates to 0. In MySQL, BigQuery,
+    /// Snowflake and Databricks, `/` returns a float or decimal.
+    pub fn division_truncates_integers(self) -> bool {
+        matches!(
+            self,
+            SqlDialect::PostgreSQL | SqlDialect::SQLite | SqlDialect::Redshift
+        )
+    }
+
     /// Whether query text may contain psql meta-commands and `:variables`
     /// (rewritten by [`crate::psql::preprocess`])
     pub(crate) fn is_psql(self) -> bool {
+        matches!(self, SqlDialect::PostgreSQL | SqlDialect::Redshift)
+    }
+
+    /// Whether implicit conversions between TIMESTAMP (without time zone) and
+    /// TIMESTAMPTZ (with time zone) depend on the session's active TimeZone setting.
+    pub fn timestamp_timezone_is_session_dependent(self) -> bool {
         matches!(self, SqlDialect::PostgreSQL | SqlDialect::Redshift)
     }
 

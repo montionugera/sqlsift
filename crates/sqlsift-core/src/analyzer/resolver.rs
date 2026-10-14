@@ -1937,9 +1937,15 @@ impl<'a> Resolver<'a> {
             | Expr::IsUnknown(expr)
             | Expr::IsNotUnknown(expr)
             | Expr::Extract { expr, .. }
-            | Expr::Collate { expr, .. }
-            | Expr::Ceil { expr, .. }
-            | Expr::Floor { expr, .. } => self.expr(expr),
+            | Expr::Collate { expr, .. } => self.expr(expr),
+            Expr::Ceil { expr, .. } => {
+                self.expr(expr);
+                self.check_ceil_floor("ceil", expr);
+            }
+            Expr::Floor { expr, .. } => {
+                self.expr(expr);
+                self.check_ceil_floor("floor", expr);
+            }
             Expr::Cast {
                 expr: inner,
                 data_type,
@@ -2004,6 +2010,7 @@ impl<'a> Resolver<'a> {
                         self.note_parameter(e, &ty);
                     }
                 }
+                self.check_in_list(expr, list);
             }
             Expr::InSubquery {
                 expr,

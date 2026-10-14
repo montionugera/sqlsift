@@ -457,3 +457,104 @@ fn e0031_joins_that_do_not_multiply() {
         assert_eq!(fan_out_codes(sql), Vec::<&str>::new(), "{sql}");
     }
 }
+
+// ---------------------------------------------------------------------
+// E0033 timestamp-timezone-mismatch
+// ---------------------------------------------------------------------
+
+const TS_SCHEMA: &str = "
+CREATE TABLE events (id INT PRIMARY KEY, occurred_at TIMESTAMPTZ, local_at TIMESTAMP);
+CREATE TABLE schedules (id INT PRIMARY KEY, starts_at TIMESTAMP);
+";
+
+fn ts_diagnostics(dialect: SqlDialect, sql: &str) -> Vec<sqlsift_core::Diagnostic> {
+    let mut builder = SchemaBuilder::with_dialect(dialect);
+    builder.parse(TS_SCHEMA).expect("schema parses");
+    let catalog = builder.build().0;
+    Analyzer::with_dialect(&catalog, dialect).analyze(sql)
+}
+
+fn ts_codes(sql: &str) -> Vec<&'static str> {
+    ts_diagnostics(SqlDialect::PostgreSQL, sql)
+        .iter()
+        .map(sqlsift_core::Diagnostic::code)
+        .collect()
+}
+
+#[test]
+fn e0033_comparing_and_assigning_timestamp_with_timestamptz() {
+    let join_sql = "SELECT * FROM events e JOIN schedules s ON e.occurred_at >= s.starts_at";
+    let diags = ts_diagnostics(SqlDialect::PostgreSQL, join_sql);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code(), "E0033");
+    assert_eq!(diags[0].severity, Severity::Warning);
+    assert_eq!(
+        diags[0].message,
+        "Comparing column 'events.occurred_at' (timestamp with time zone) with 'schedules.starts_at' (timestamp) depends on session TimeZone"
+    );
+
+    let where_sql = "SELECT * FROM events WHERE occurred_at >= local_at";
+    let diags = ts_diagnostics(SqlDialect::PostgreSQL, where_sql);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code(), "E0033");
+
+    let update_sql = "UPDATE events SET local_at = occurred_at";
+    let diags = ts_diagnostics(SqlDialect::PostgreSQL, update_sql);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code(), "E0033");
+    assert_eq!(
+        diags[0].message,
+        "Assigning column 'events.occurred_at' (timestamp with time zone) to 'events.local_at' (timestamp) depends on session TimeZone"
+    );
+
+    let update_rev = "UPDATE events SET occurred_at = local_at";
+    let diags = ts_diagnostics(SqlDialect::PostgreSQL, update_rev);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code(), "E0033");
+}
+
+#[test]
+fn e0033_silent_for_literals_now_and_casts() {
+    for sql in [
+        // Literals are fine
+        "SELECT * FROM events WHERE occurred_at >= '2024-01-01 00:00:00'",
+        "SELECT * FROM events WHERE local_at >= '2024-01-01 00:00:00'",
+        // now() and CURRENT_TIMESTAMP are fine
+        "SELECT * FROM events WHERE local_at >= now()",
+        "SELECT * FROM events WHERE local_at >= CURRENT_TIMESTAMP",
+        "UPDATE events SET local_at = now()",
+        // Explicit casts and AT TIME ZONE
+        "SELECT * FROM events e JOIN schedules s ON e.occurred_at >= CAST(s.starts_at AS timestamptz)",
+        "SELECT * FROM events e JOIN schedules s ON e.occurred_at >= s.starts_at::timestamptz",
+        "SELECT * FROM events e JOIN schedules s ON (e.occurred_at AT TIME ZONE 'UTC') >= s.starts_at",
+        "UPDATE events SET local_at = (occurred_at AT TIME ZONE 'UTC')",
+        // Same types compared
+        "SELECT * FROM events e1 JOIN events e2 ON e1.occurred_at = e2.occurred_at",
+        "SELECT * FROM schedules s1 JOIN schedules s2 ON s1.starts_at = s2.starts_at",
+    ] {
+        assert_eq!(ts_codes(sql), Vec::<&str>::new(), "{sql}");
+    }
+}
+
+#[test]
+fn e0033_dialect_support() {
+    let sql = "SELECT * FROM events WHERE occurred_at >= local_at";
+    // PostgreSQL and Redshift warn
+    assert_eq!(
+        ts_diagnostics(SqlDialect::Redshift, sql)
+            .iter()
+            .map(sqlsift_core::Diagnostic::code)
+            .collect::<Vec<_>>(),
+        ["E0033"]
+    );
+    // Other dialects stay silent
+    let mut builder = SchemaBuilder::with_dialect(SqlDialect::MySQL);
+    builder
+        .parse(
+            "CREATE TABLE events (id INT PRIMARY KEY, occurred_at TIMESTAMP, local_at DATETIME);",
+        )
+        .unwrap();
+    let catalog = builder.build().0;
+    let diags = Analyzer::with_dialect(&catalog, SqlDialect::MySQL).analyze(sql);
+    assert!(diags.is_empty(), "{diags:?}");
+}

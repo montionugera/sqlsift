@@ -38,6 +38,8 @@ E0028  limit-without-order-by    restriction  off      LIMIT or OFFSET without O
 E0029  implicit-conversion       suspicious   warn     Type mismatch MySQL or SQLite converts implicitly
 E0030  foreign-key-join-mismatch suspicious   warn     JOIN condition doesn't follow the foreign key between the tables
 E0031  join-fan-out              suspicious   warn     Aggregate over rows that another one-to-many join multiplies
+E0032  integer-division          pedantic     off      Division of integer columns truncates toward zero
+E0033  timestamp-timezone-mismatch suspicious warn     Comparing or assigning timestamp with timestamptz depends on session TimeZone
 E1000  parse-error               correctness  error    SQL could not be parsed
 ```
 
@@ -63,7 +65,7 @@ Like [oxlint](https://oxc.rs/docs/guide/usage/linter.html), every rule belongs t
 | `style` | off | Conventions and readability |
 | `restriction` | off | Bans on features some codebases don't want |
 
-Current rules are in `correctness` (errors), `suspicious` (warnings) and `restriction` (off), as `sqlsift rules` shows above.
+Current rules are in `correctness` (errors), `suspicious` (warnings), `pedantic` (off) and `restriction` (off), as `sqlsift rules` shows above.
 
 ## Changing levels
 
