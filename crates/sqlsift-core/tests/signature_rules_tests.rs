@@ -112,6 +112,15 @@ fn functions_and_operators_the_schema_defines_may_overload() {
 }
 
 #[test]
+fn schema_defined_function_skips_builtin_return_type() {
+    let schema = format!(
+        "{SCHEMA}\nCREATE OR REPLACE FUNCTION date_trunc(text, text) RETURNS integer AS $$ SELECT 1 $$ LANGUAGE sql;"
+    );
+    let pg = |sql| codes_with(&schema, SqlDialect::PostgreSQL, sql);
+    assert!(pg("SELECT id FROM s WHERE date_trunc('day', 'x') = 1").is_empty());
+}
+
+#[test]
 fn other_dialects_convert_implicitly() {
     for dialect in [SqlDialect::MySQL, SqlDialect::SQLite] {
         assert!(codes_with(
@@ -248,6 +257,66 @@ fn text_functions_parenthesize_complex_expression_in_cast_help() {
         diags[0].help.as_deref(),
         Some("Cast the argument to text: lpad(id::text, 8, '0')")
     );
+}
+
+#[test]
+fn regression_review_361_builtin_inference_operator_and_function_refinements() {
+    let schema_with_hstore = format!(
+        "{SCHEMA}\nCREATE TABLE sh (h HSTORE, name TEXT);\nCREATE TABLE flags (flag INT, flag2 INT);\nCREATE TABLE jdata (j JSONB);\n"
+    );
+    let pg = |sql| codes_with(&schema_with_hstore, SqlDialect::PostgreSQL, sql);
+    let mysql = |sql| codes_with(&schema_with_hstore, SqlDialect::MySQL, sql);
+    let sqlite = |sql| codes_with(&schema_with_hstore, SqlDialect::SQLite, sql);
+
+    // 1. bytea: b || b = b and string_agg(b, ',') = b (no false positive)
+    assert!(pg("SELECT id FROM s WHERE by || by = by").is_empty());
+    assert!(pg("SELECT string_agg(by, ',') = by FROM s GROUP BY by").is_empty());
+    assert_eq!(pg("SELECT id FROM s WHERE by || by = 1"), ["E0003"]);
+    assert_eq!(pg("SELECT string_agg(by, ',') = 1 FROM s"), ["E0003"]);
+    assert_eq!(pg("SELECT string_agg(name, ',') = 1 FROM s"), ["E0003"]);
+
+    // 2. array: array_agg(id) || 1 (no false positive)
+    assert!(pg("SELECT array_agg(id) || 1 FROM s").is_empty());
+    assert!(pg("SELECT (array_agg(id) || 1) = ARRAY[1] FROM s").is_empty());
+
+    // 3. hstore: h -> 'k' = name and h -> 'k' LIKE 'a%' (no false positive)
+    assert!(pg("SELECT * FROM sh WHERE h -> 'k' = name").is_empty());
+    assert!(pg("SELECT * FROM sh WHERE h -> 'k' LIKE 'a%'").is_empty());
+    // For jsonb, -> is jsonb so LIKE is rejected
+    assert_eq!(pg("SELECT * FROM s WHERE j -> 'k' LIKE 'a%'"), ["E0027"]);
+
+    // 4. MySQL: flag = 1 || flag2 = 1 (no E0029 false positive)
+    assert!(mysql("SELECT * FROM flags WHERE flag = 1 || flag2 = 1").is_empty());
+
+    // 5. SQLite: j->>'$.n' = 1 (no E0003 false positive)
+    assert!(sqlite("SELECT * FROM jdata WHERE j->>'$.n' = 1").is_empty());
+    // In PostgreSQL, ->> returns text so comparing to int reports E0003
+    assert_eq!(pg("SELECT * FROM jdata WHERE j->>'$.n' = 1"), ["E0003"]);
+
+    // 6. date_trunc with unknown argument stays Unknown (no false positive)
+    assert!(pg("SELECT id FROM s WHERE date_trunc('day', unknown_fn(ts)) = 1").is_empty());
+    // date_trunc with known timestamp column compares to int -> E0003
+    assert_eq!(
+        pg("SELECT id FROM s WHERE date_trunc('day', ts) = 1"),
+        ["E0003"]
+    );
+
+    // 7. string literal or text column next to unknown operand stays Unknown (no false positive)
+    let schema_with_types = format!(
+        "{SCHEMA}\nCREATE TABLE ttypes (tags TEXT[], jb JSONB, jplain JSON, b BYTEA, s TEXT);\n"
+    );
+    let pgt = |sql| codes_with(&schema_with_types, SqlDialect::PostgreSQL, sql);
+    assert!(pgt("SELECT * FROM ttypes WHERE s || string_to_array('a,b', ',') = tags").is_empty());
+    assert!(pgt("SELECT * FROM ttypes WHERE '{\"a\":1}' || to_jsonb(s) = jb").is_empty());
+    assert!(pgt("SELECT * FROM ttypes WHERE '\\x00' || decode('aa', 'hex') = b").is_empty());
+
+    // 8. json || 'x' returns text (only jsonb keeps its type)
+    assert!(pgt("SELECT * FROM ttypes WHERE jplain || 'x' = s").is_empty());
+    assert_eq!(
+        pgt("SELECT * FROM ttypes WHERE jplain || 'x' = 1"),
+        ["E0003"]
+    );
+    assert!(pgt("SELECT * FROM ttypes WHERE jb || '{\"a\":1}' = jb").is_empty());
 }
 
 #[test]

@@ -219,9 +219,10 @@ The action is also listed on the [GitHub Marketplace](https://github.com/marketp
 | [E0031](https://sqlsift.dev/docs/rules/E0031.html) | join-fan-out | Aggregate over rows that another one-to-many join multiplies |
 | [E0032](https://sqlsift.dev/docs/rules/E0032.html) | integer-division | Division of integer columns truncates toward zero |
 | [E0033](https://sqlsift.dev/docs/rules/E0033.html) | timestamp-timezone-mismatch | Comparing or assigning timestamp with timestamptz depends on session TimeZone |
+| [E0034](https://sqlsift.dev/docs/rules/E0034.html) | case-enum-missing-labels | CASE over an enum column misses some labels and has no ELSE |
 | [E0035](https://sqlsift.dev/docs/rules/E0035.html) | duplicate-insert-value | Duplicate primary key or unique values in an INSERT VALUES list |
 
-E0001-E0017, E0027, and E0035 report queries the database rejects and are errors by default; E0018-E0023, E0029-E0031, and E0033 (`suspicious`) report valid queries that almost certainly don't do what was meant and are warnings by default; E0024-E0026 and E0028 (`restriction`) and E0032 (`pedantic`) are off until enabled (`-W restriction`, `-W pedantic`).
+E0001-E0017, E0027, and E0035 report queries the database rejects and are errors by default; E0018-E0023, E0029-E0031, and E0033 (`suspicious`) report valid queries that almost certainly don't do what was meant and are warnings by default; E0024-E0026 and E0028 (`restriction`) and E0032, E0034 (`pedantic`) are off until enabled (`-W restriction`, `-W pedantic`).
 
 Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sqlsift.toml`) or per run (`-A` / `-W` / `-D`), and silenced for a line or a file with `-- sqlsift:disable` / `-- sqlsift:disable-file` comments, or for a whole existing backlog with a baseline (`--write-baseline` / `--baseline`). See [Rules and levels](https://sqlsift.dev/docs/guide/rules.html) and [Suppressing diagnostics](https://sqlsift.dev/docs/guide/suppression.html).
 

@@ -269,6 +269,7 @@ Dependencies must have a license allowed by `deny.toml` (CI job "Licenses"). Aft
 - **E0031** (suspicious, warning): sum/avg/count over a table joined one-to-many next to another one-to-many join of the same parent (double counting; `analyzer/fan_out.rs`)
 - **E0032** (pedantic, off by default): division of integer columns truncates toward zero (`qty / items`; `analyzer/type_check.rs`)
 - **E0033** (suspicious, warning): comparing or assigning `timestamp` (without time zone) with `timestamptz` (with time zone) depends on session TimeZone setting in PostgreSQL and Redshift (`analyzer/type_check.rs`)
+- **E0034** (pedantic, off by default): CASE over an enum column misses some labels and has no ELSE (`analyzer/pedantic.rs`)
 - **E0035**: Duplicate primary key or unique values in INSERT VALUES list (`analyzer/structure.rs`)
 - **E1000**: Generic parse error
 

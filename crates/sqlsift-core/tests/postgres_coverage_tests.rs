@@ -565,6 +565,13 @@ fn valid_functions() {
             "SELECT jsonb_build_object('id', id) FROM users",
             "SELECT jsonb_typeof(settings), jsonb_array_length(payload) FROM users CROSS JOIN events",
             "SELECT pg_typeof(id) FROM users",
+            "SELECT * FROM users WHERE date_trunc('day', created_at) = now()",
+            "SELECT * FROM users WHERE to_char(created_at, 'YYYY') = '2024'",
+            "SELECT * FROM users WHERE extract(year FROM created_at) = 2024",
+            "SELECT * FROM users WHERE settings->>'theme' = 'dark'",
+            "SELECT * FROM users WHERE name || 'x' = 'Annx'",
+            "SELECT * FROM users WHERE age(created_at) > INTERVAL '1 year'",
+            "SELECT * FROM users WHERE to_date('2024-01-01', 'YYYY-MM-DD') = DATE '2024-01-01'",
         ],
     );
 }
@@ -1113,6 +1120,30 @@ fn invalid_type_mismatch() {
             ("DELETE FROM users WHERE id = 'y'", M),
             ("SELECT * FROM billing.invoices WHERE amount = 'x'", M),
             ("SELECT * FROM billing.invoices WHERE paid = 3", M),
+            (
+                "SELECT * FROM users WHERE date_trunc('day', created_at) = 1",
+                M,
+            ),
+            ("SELECT to_char(created_at, 'YYYY') + 1 FROM users", M),
+            (
+                "SELECT * FROM users WHERE extract(year FROM created_at) = 'x'",
+                M,
+            ),
+            ("SELECT * FROM users WHERE settings->>'theme' = 1", M),
+            ("SELECT * FROM users WHERE name || 'x' = 1", M),
+            (
+                "SELECT * FROM users WHERE date_part('year', created_at) = 'x'",
+                M,
+            ),
+            ("SELECT * FROM users WHERE split_part(email, '@', 1) = 1", M),
+            ("SELECT * FROM users WHERE format('%s', name) = 1", M),
+            ("SELECT * FROM users WHERE string_agg(name, ',') = 1", M),
+            (
+                "SELECT * FROM users WHERE to_date('2024-01-01', 'YYYY-MM-DD') = 1",
+                M,
+            ),
+            ("SELECT * FROM users WHERE make_date(2024, 1, 1) = 1", M),
+            ("SELECT * FROM users WHERE age(created_at) = 1", M),
             ("SELECT * FROM orders WHERE status = 1", M),
             (
                 "SELECT * FROM orders o JOIN users u ON u.id = o.user_id WHERE o.status = u.name",

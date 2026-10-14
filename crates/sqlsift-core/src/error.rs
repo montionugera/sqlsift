@@ -217,6 +217,8 @@ pub enum DiagnosticKind {
     IntegerDivision,
     /// E0033: Comparing or assigning timestamp with timestamptz depends on session TimeZone
     TimestampTimezoneMismatch,
+    /// E0034: CASE over an enum column misses some labels and has no ELSE
+    CaseEnumMissingLabels,
     /// E0035: Duplicate primary key or unique values in an INSERT VALUES list
     DuplicateInsertValue,
     /// Parse error

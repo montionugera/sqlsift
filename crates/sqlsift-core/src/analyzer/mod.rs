@@ -7,6 +7,7 @@ mod fan_out;
 mod grouping;
 mod nullability;
 mod parameters;
+mod pedantic;
 mod ranges;
 mod resolver;
 mod restriction;
@@ -595,6 +596,8 @@ impl<'a> Analyzer<'a> {
             ]
             .into_iter()
             .any(|kind| self.rules.level(kind) != crate::rules::RuleLevel::Off);
+            let case_enum_missing_labels = self.rules.level(DiagnosticKind::CaseEnumMissingLabels)
+                != crate::rules::RuleLevel::Off;
             let templated_name = |span: &Span| {
                 let mut span = *span;
                 origin.shift(&mut span);
@@ -622,6 +625,7 @@ impl<'a> Analyzer<'a> {
             resolver.templated_statement = templated || !statement_fragments.is_empty();
             resolver.hidden_relations = statement_fragments.contains(&true);
             resolver.restrictions = restrictions;
+            resolver.case_enum_missing_labels = case_enum_missing_labels;
             resolver.references = self.references.is_some().then(Vec::new);
             let describing = self.descriptions.is_some() && QueryKind::of(stmt).is_some();
             if describing {

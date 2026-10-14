@@ -380,6 +380,13 @@ pub const RULES: &[Rule] = &[
         summary: "Comparing or assigning timestamp with timestamptz depends on session TimeZone",
     },
     Rule {
+        kind: DiagnosticKind::CaseEnumMissingLabels,
+        code: "E0034",
+        name: "case-enum-missing-labels",
+        category: RuleCategory::Pedantic,
+        summary: "CASE over an enum column misses some labels and has no ELSE",
+    },
+    Rule {
         kind: DiagnosticKind::DuplicateInsertValue,
         code: "E0035",
         name: "duplicate-insert-value",

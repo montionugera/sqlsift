@@ -61,5 +61,6 @@ CREATE TABLE coupons (
 | [E0031](E0031.md) | `join-fan-out` | Aggregate over rows that another one-to-many join multiplies |
 | [E0032](E0032.md) | `integer-division` | Division of integer columns truncates toward zero |
 | [E0033](E0033.md) | `timestamp-timezone-mismatch` | Comparing or assigning timestamp with timestamptz depends on session TimeZone |
+| [E0034](E0034.md) | `case-enum-missing-labels` | CASE over an enum column misses some labels and has no ELSE |
 | [E0035](E0035.md) | `duplicate-insert-value` | Duplicate primary key or unique values in an INSERT VALUES list |
 | [E1000](E1000.md) | `parse-error` | SQL could not be parsed |

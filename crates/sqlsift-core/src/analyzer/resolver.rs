@@ -33,11 +33,12 @@ use super::scope::{
     lookup_ignore_case, split_column_ref, Column, ColumnLookup, ColumnMatch, Cte, ExpressionType,
     Relation, RelationKind, Scope, UNNAMED_COLUMN,
 };
-use super::structure::Clause;
+use super::structure::{is_aggregate, Clause};
 use super::suspicious::InSubquery;
 use super::{Reference, ReferenceKind};
 
 /// Resolves names and checks types in SQL statements
+#[allow(clippy::struct_excessive_bools)]
 pub(super) struct Resolver<'a> {
     pub(super) catalog: &'a Catalog,
     pub(super) dialect: SqlDialect,
@@ -70,6 +71,10 @@ pub(super) struct Resolver<'a> {
     pub(super) in_subquery: Option<InSubquery>,
     /// Whether a restriction rule (off by default) is enabled
     pub(super) restrictions: bool,
+    /// Whether E0034 case-enum-missing-labels is enabled
+    pub(super) case_enum_missing_labels: bool,
+    /// Depth inside aggregate function arguments (to skip conditional aggregation CASE)
+    pub(super) in_aggregate_arg: usize,
     /// Uses of catalog tables, views and their columns, when they are recorded
     pub(super) references: Option<Vec<Reference>>,
     /// Types of the statement's placeholders, only collected when describing (it
@@ -94,6 +99,8 @@ impl<'a> Resolver<'a> {
             row_subqueries: Vec::new(),
             in_subquery: None,
             restrictions: false,
+            case_enum_missing_labels: false,
+            in_aggregate_arg: 0,
             references: None,
             parameter_types: None,
         }
@@ -1960,6 +1967,10 @@ impl<'a> Resolver<'a> {
                 self.expr(inner);
             }
             Expr::Function(func) => {
+                let is_agg = is_aggregate(func, self.dialect);
+                if is_agg {
+                    self.in_aggregate_arg += 1;
+                }
                 match (&func.args, self.date_part_arg(func)) {
                     // Snowflake date part keyword (`DATEADD(day, 1, d)`): not a column
                     (FunctionArguments::List(list), Some(index)) => {
@@ -1971,7 +1982,6 @@ impl<'a> Resolver<'a> {
                     }
                     (args, _) => self.function_args(args),
                 }
-                self.check_function_signature(func);
                 // ORDER BY inside aggregate arguments: array_agg(x ORDER BY y)
                 if let sqlparser::ast::FunctionArguments::List(list) = &func.args {
                     for clause in &list.clauses {
@@ -1982,6 +1992,10 @@ impl<'a> Resolver<'a> {
                         }
                     }
                 }
+                if is_agg {
+                    self.in_aggregate_arg -= 1;
+                }
+                self.check_function_signature(func);
                 // WITHIN GROUP (ORDER BY ...)
                 for ob in &func.within_group {
                     self.expr(&ob.expr);
@@ -2075,6 +2089,14 @@ impl<'a> Resolver<'a> {
                     .chain(else_result.as_deref())
                     .collect();
                 self.check_case_branches(&branches);
+                if self.case_enum_missing_labels && self.in_aggregate_arg == 0 {
+                    self.check_case_enum_missing_labels(
+                        expr,
+                        operand.as_deref(),
+                        conditions,
+                        else_result.as_deref(),
+                    );
+                }
             }
             Expr::Substring {
                 expr,
