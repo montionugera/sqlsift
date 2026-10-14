@@ -31,6 +31,14 @@ fn single_pg(catalog: &Catalog, sql: &str) -> Diagnostic {
     single(catalog, SqlDialect::PostgreSQL, sql)
 }
 
+fn check(catalog: &Catalog, dialect: SqlDialect, sql: &str) -> Vec<Diagnostic> {
+    Analyzer::with_dialect(catalog, dialect).analyze(sql)
+}
+
+fn check_pg(catalog: &Catalog, sql: &str) -> Vec<Diagnostic> {
+    check(catalog, SqlDialect::PostgreSQL, sql)
+}
+
 // ---------------------------------------------------------------------
 // #84: table suggestions in other schemas are schema-qualified
 // ---------------------------------------------------------------------
@@ -287,6 +295,116 @@ fn named_enum_keeps_the_type_name() {
         d.message,
         "Invalid value 'archived' for enum type 'post_status'"
     );
+}
+
+// ---------------------------------------------------------------------
+// #129: Check enum values in IN and NOT IN lists
+// ---------------------------------------------------------------------
+
+#[test]
+fn named_enum_in_list() {
+    let c = pg("
+        CREATE TYPE post_status AS ENUM ('draft', 'published', 'archived');
+        CREATE TABLE posts (id INT, status post_status);
+    ");
+
+    // All valid values: no diagnostics
+    let d = check_pg(
+        &c,
+        "SELECT id FROM posts WHERE status IN ('draft', 'published')",
+    );
+    assert!(d.is_empty(), "expected no diagnostics, got {d:?}");
+
+    // One invalid value with typo suggestion
+    let d = single_pg(
+        &c,
+        "SELECT id FROM posts WHERE status IN ('draft', 'publishd')",
+    );
+    assert_eq!(d.kind, DiagnosticKind::TypeMismatch);
+    assert_eq!(
+        d.message,
+        "Invalid value 'publishd' for enum type 'post_status'"
+    );
+    assert_eq!(d.help.as_deref(), Some("Did you mean 'published'?"));
+
+    // NOT IN with invalid value
+    let d = single_pg(
+        &c,
+        "SELECT id FROM posts WHERE status NOT IN ('draft', 'archvd')",
+    );
+    assert_eq!(d.kind, DiagnosticKind::TypeMismatch);
+    assert_eq!(
+        d.message,
+        "Invalid value 'archvd' for enum type 'post_status'"
+    );
+    assert_eq!(d.help.as_deref(), Some("Did you mean 'archived'?"));
+
+    // Multiple invalid values produce one diagnostic per bad value
+    let d = check_pg(
+        &c,
+        "SELECT id FROM posts WHERE status IN ('draft', 'publishd', 'archvd')",
+    );
+    assert_eq!(d.len(), 2);
+    assert_eq!(
+        d[0].message,
+        "Invalid value 'publishd' for enum type 'post_status'"
+    );
+    assert_eq!(
+        d[1].message,
+        "Invalid value 'archvd' for enum type 'post_status'"
+    );
+}
+
+#[test]
+fn inline_enum_in_list_mysql() {
+    let c = catalog(CUSTOMERS, SqlDialect::MySQL);
+
+    // All valid: no diagnostics
+    let d = check(
+        &c,
+        SqlDialect::MySQL,
+        "SELECT id FROM customers WHERE plan IN ('free', 'pro')",
+    );
+    assert!(d.is_empty(), "expected no diagnostics, got {d:?}");
+
+    // Invalid value: MySQL reports ImplicitConversion
+    let d = single(
+        &c,
+        SqlDialect::MySQL,
+        "SELECT id FROM customers WHERE plan IN ('free', 'gold')",
+    );
+    assert_eq!(d.kind, DiagnosticKind::ImplicitConversion);
+    assert_eq!(
+        d.message,
+        "Invalid value 'gold' for enum column 'customers.plan'"
+    );
+    assert_eq!(
+        d.help.as_deref(),
+        Some("Valid values: 'free', 'pro', 'enterprise'")
+    );
+
+    // NOT IN with invalid value
+    let d = single(
+        &c,
+        SqlDialect::MySQL,
+        "SELECT id FROM customers WHERE plan NOT IN ('silver')",
+    );
+    assert_eq!(d.kind, DiagnosticKind::ImplicitConversion);
+    assert_eq!(
+        d.message,
+        "Invalid value 'silver' for enum column 'customers.plan'"
+    );
+}
+
+#[test]
+fn non_enum_in_list_produces_no_diagnostic() {
+    let c = pg("
+        CREATE TABLE users (id INT, name TEXT, age INT);
+    ");
+    let d = check_pg(&c, "SELECT id FROM users WHERE name IN ('alice', 'bob')");
+    assert!(d.is_empty(), "expected no diagnostics, got {d:?}");
+    let d = check_pg(&c, "SELECT id FROM users WHERE age IN (10, 20, 30)");
+    assert!(d.is_empty(), "expected no diagnostics, got {d:?}");
 }
 
 // ---------------------------------------------------------------------

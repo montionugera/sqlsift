@@ -366,6 +366,20 @@ pub const RULES: &[Rule] = &[
         summary: "Aggregate over rows that another one-to-many join multiplies",
     },
     Rule {
+        kind: DiagnosticKind::IntegerDivision,
+        code: "E0032",
+        name: "integer-division",
+        category: RuleCategory::Pedantic,
+        summary: "Division of integer columns truncates toward zero",
+    },
+    Rule {
+        kind: DiagnosticKind::TimestampTimezoneMismatch,
+        code: "E0033",
+        name: "timestamp-timezone-mismatch",
+        category: RuleCategory::Suspicious,
+        summary: "Comparing or assigning timestamp with timestamptz depends on session TimeZone",
+    },
+    Rule {
         kind: DiagnosticKind::DuplicateInsertValue,
         code: "E0035",
         name: "duplicate-insert-value",
