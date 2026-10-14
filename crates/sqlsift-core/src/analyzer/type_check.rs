@@ -252,8 +252,8 @@ impl Resolver<'_> {
         self.type_conflict(column_type, value_type)
     }
 
-    /// Check a comparison's operand types (E0003)
-    fn check_comparison(&mut self, left: &Expr, right: &Expr) {
+    /// Check a comparison's operand types (E0003) and collations (E0036)
+    fn check_comparison(&mut self, left: &Expr, op: &BinaryOperator, right: &Expr) {
         let left_type = self.infer_expr_type(left);
         let right_type = self.infer_expr_type(right);
         self.note_compared_parameters(left, &left_type, right, &right_type);
@@ -288,10 +288,11 @@ impl Resolver<'_> {
             return;
         }
         self.check_timestamp_timezone_mismatch(left, &left_type, right, &right_type, span);
+        self.check_collation_mix(left, right, &op.to_string(), span);
     }
 
-    /// Check a comparison in a JOIN ... ON condition (E0007)
-    pub(super) fn check_join_comparison(&mut self, left: &Expr, right: &Expr) {
+    /// Check a comparison in a JOIN ... ON condition (E0007) and collations (E0036)
+    pub(super) fn check_join_comparison(&mut self, left: &Expr, op: &BinaryOperator, right: &Expr) {
         let left_type = self.infer_expr_type(left);
         let right_type = self.infer_expr_type(right);
         self.note_compared_parameters(left, &left_type, right, &right_type);
@@ -314,6 +315,7 @@ impl Resolver<'_> {
             return;
         }
         self.check_timestamp_timezone_mismatch(left, &left_type, right, &right_type, span);
+        self.check_collation_mix(left, right, &op.to_string(), span);
     }
 
     /// Check `expr IN (SELECT col ...)`: the value must be comparable with the column
@@ -334,6 +336,24 @@ impl Resolver<'_> {
             diag.span = located_span(expr);
             self.push_mismatch(diag);
             return;
+        }
+        if self.dialect == SqlDialect::MySQL {
+            if let (Some(left_coll), Some(right_coll)) =
+                (self.column_collation(expr), &column.collation)
+            {
+                if !left_coll.eq_ignore_ascii_case(right_coll) {
+                    let mut diag = Diagnostic::error(
+                        DiagnosticKind::IllegalMixOfCollations,
+                        format!(
+                            "Illegal mix of collations ({left_coll},IMPLICIT) and ({right_coll},IMPLICIT) for operation 'IN'"
+                        ),
+                    )
+                    .with_help("Collation mismatch between column references. Consider using an explicit COLLATE clause.");
+                    diag.span = located_span(expr);
+                    self.diagnostics.push(diag);
+                    return;
+                }
+            }
         }
         if self.dialect.timestamp_timezone_is_session_dependent() && is_column_reference(expr) {
             if let (Some(left_col), ExpressionType::Known(vt), ExpressionType::Known(ct)) =
@@ -369,6 +389,24 @@ impl Resolver<'_> {
             let item_span = span.or_else(|| located_span(item));
             let item_column = column.clone().or_else(|| self.column_label(item));
             self.report_enum_literal(&expr_type, &item_type, item_column, item_span, false);
+            if self.dialect == SqlDialect::MySQL {
+                if let (Some(left_coll), Some(right_coll)) =
+                    (self.column_collation(expr), self.column_collation(item))
+                {
+                    if !left_coll.eq_ignore_ascii_case(&right_coll) {
+                        let mut diag = Diagnostic::error(
+                            DiagnosticKind::IllegalMixOfCollations,
+                            format!(
+                                "Illegal mix of collations ({left_coll},IMPLICIT) and ({right_coll},IMPLICIT) for operation 'IN'"
+                            ),
+                        )
+                        .with_help("Collation mismatch between column references. Consider using an explicit COLLATE clause.");
+                        diag.span = item_span;
+                        self.diagnostics.push(diag);
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -383,8 +421,10 @@ impl Resolver<'_> {
         right: &Expr,
         left_type: Option<ExpressionType>,
     ) -> Option<ExpressionType> {
-        if is_comparison_operator(op) {
-            self.check_comparison(left, right);
+        if is_comparison_operator(op)
+            || (self.dialect == SqlDialect::MySQL && matches!(op, BinaryOperator::Spaceship))
+        {
+            self.check_comparison(left, op, right);
             return None;
         }
 
@@ -584,6 +624,28 @@ impl Resolver<'_> {
                     .with_span(Span::from_sqlparser(&right_expr.span()))
                     .with_help("Corresponding columns in UNION/INTERSECT/EXCEPT should be type-compatible."),
                 );
+            }
+            if self.dialect == SqlDialect::MySQL {
+                if let (Some(left_coll), Some(right_coll)) = (&l.collation, &r.collation) {
+                    if !left_coll.eq_ignore_ascii_case(right_coll) {
+                        let op_name = match right_expr {
+                            SetExpr::SetOperation { op, .. } => op.to_string(),
+                            _ => "UNION".to_string(),
+                        };
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                DiagnosticKind::IllegalMixOfCollations,
+                                format!(
+                                    "Illegal mix of collations ({left_coll},IMPLICIT) and ({right_coll},IMPLICIT) for operation '{op_name}'"
+                                ),
+                            )
+                            .with_span(Span::from_sqlparser(&right_expr.span()))
+                            .with_help(
+                                "Collation mismatch between column references. Consider using an explicit COLLATE clause.",
+                            ),
+                        );
+                    }
+                }
             }
         }
     }
@@ -989,6 +1051,114 @@ impl Resolver<'_> {
         );
         diag.span = span;
         self.diagnostics.push(diag);
+    }
+
+    /// A column reference's catalog/scope Column, if expr resolves to one
+    pub(super) fn column_of_expr<'a>(&'a self, expr: &Expr) -> Option<&'a Column> {
+        match expr {
+            Expr::Identifier(ident) => match self.scope.column(&ident.value, self.dialect) {
+                ColumnLookup::Found(col) => Some(col),
+                _ => None,
+            },
+            Expr::CompoundIdentifier(parts) => {
+                let parts = split_dotted_idents(parts);
+                let (schema, table, column) = split_column_ref(&parts)?;
+                let rel = self.scope.qualified_relation(self.catalog, schema, table)?;
+                match rel.column(&column.value, self.dialect) {
+                    ColumnMatch::Yes(col) => Some(col),
+                    _ => None,
+                }
+            }
+            Expr::Nested(inner) => self.column_of_expr(inner),
+            _ => None,
+        }
+    }
+
+    /// The collation of a column reference, if known
+    pub(super) fn column_collation(&self, expr: &Expr) -> Option<String> {
+        self.column_of_expr(expr).and_then(|c| c.collation.clone())
+    }
+
+    /// Infer the collation of an expression (only column references carry implicit collations)
+    pub(super) fn infer_expr_collation(&self, expr: &Expr) -> Option<String> {
+        self.column_collation(expr)
+    }
+
+    /// Infer the character set of an expression (only column references carry charsets)
+    pub(super) fn infer_expr_charset(&self, expr: &Expr) -> Option<String> {
+        self.column_of_expr(expr)
+            .and_then(|c| c.character_set.clone())
+    }
+
+    /// Check if two expressions have incompatible collations (MySQL E0036)
+    pub(super) fn check_collation_mix(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+        op_name: &str,
+        span: Option<Span>,
+    ) {
+        if self.dialect != SqlDialect::MySQL {
+            return;
+        }
+        let (Some(left_coll), Some(right_coll)) =
+            (self.column_collation(left), self.column_collation(right))
+        else {
+            return;
+        };
+        if left_coll.eq_ignore_ascii_case(&right_coll) {
+            return;
+        }
+        let mut diag = Diagnostic::error(
+            DiagnosticKind::IllegalMixOfCollations,
+            format!(
+                "Illegal mix of collations ({left_coll},IMPLICIT) and ({right_coll},IMPLICIT) for operation '{op_name}'"
+            ),
+        )
+        .with_help("Collation mismatch between column references. Consider using an explicit COLLATE clause.");
+        diag.span = span;
+        self.diagnostics.push(diag);
+    }
+
+    /// Check COALESCE / IFNULL function arguments for incompatible collations (MySQL E0036)
+    pub(super) fn check_coalesce_collation(&mut self, func: &sqlparser::ast::Function) {
+        if self.dialect != SqlDialect::MySQL {
+            return;
+        }
+        let Some(name) = func
+            .name
+            .0
+            .last()
+            .map(|p| p.ident().value.to_ascii_uppercase())
+        else {
+            return;
+        };
+        if name != "COALESCE" && name != "IFNULL" {
+            return;
+        }
+        let args = unnamed_args(func);
+        for i in 0..args.len() {
+            for j in (i + 1)..args.len() {
+                if let (Some(c1), Some(c2)) = (
+                    self.column_collation(args[i]),
+                    self.column_collation(args[j]),
+                ) {
+                    if !c1.eq_ignore_ascii_case(&c2) {
+                        let span = located_span(args[i]).or_else(|| located_span(args[j]));
+                        let mut diag = Diagnostic::error(
+                            DiagnosticKind::IllegalMixOfCollations,
+                            format!(
+                                "Illegal mix of collations ({c1},IMPLICIT) and ({c2},IMPLICIT) for operation '{name}'"
+                            ),
+                        )
+                        .with_help("Collation mismatch between column references. Consider using an explicit COLLATE clause.");
+                        diag.span = span;
+                        self.diagnostics.push(diag);
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     pub(super) fn infer_qualified_column(
