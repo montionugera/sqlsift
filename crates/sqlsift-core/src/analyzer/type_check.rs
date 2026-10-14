@@ -13,9 +13,11 @@
 //!   are reported in [`ranges`](super::ranges) (E0017)
 //! - CASE branch consistency, set operation column counts and types
 
+use std::ops::ControlFlow;
+
 use sqlparser::ast::{
     AssignmentTarget, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
-    Insert, Parens, SetExpr, Spanned, Value, ValueWithSpan,
+    Insert, Parens, SetExpr, Spanned, Value, ValueWithSpan, Visit, Visitor,
 };
 
 use crate::ast_ext::{column_ident, insert_table, name_last, ObjectNamePartExt};
@@ -152,7 +154,7 @@ impl Resolver<'_> {
         if self.dialect.converts_mismatched_types() && ty.is_numeric() {
             return literal.trim().parse::<f64>().is_ok();
         }
-        ty.accepts_string_literal(literal)
+        ty.accepts_string_literal_in(literal, self.dialect)
     }
 
     /// The display names of two types that can't be compared or assigned, or `None`
@@ -213,11 +215,25 @@ impl Resolver<'_> {
             return;
         }
         if let Some((lt, rt)) = self.type_conflict(&left_type, &right_type) {
+            let help = match (&left_type, &right_type) {
+                (ExpressionType::Known(t), ExpressionType::StringLiteral(lit))
+                | (ExpressionType::StringLiteral(lit), ExpressionType::Known(t))
+                    if matches!(
+                        t,
+                        SqlType::Date | SqlType::Timestamp { .. } | SqlType::Time { .. }
+                    ) =>
+                {
+                    format!("'{lit}' is not a valid {}", t.display_name_in(self.dialect))
+                }
+                _ => {
+                    "Types are not implicitly compatible. Consider using explicit CAST.".to_string()
+                }
+            };
             let mut diag = Diagnostic::error(
                 DiagnosticKind::TypeMismatch,
                 format!("Type mismatch: cannot compare {lt} with {rt}"),
             )
-            .with_help("Types are not implicitly compatible. Consider using explicit CAST.");
+            .with_help(help);
             diag.span = span;
             self.push_mismatch(diag);
         }
@@ -264,6 +280,19 @@ impl Resolver<'_> {
             .with_help("Types are not implicitly compatible. Consider using explicit CAST.");
             diag.span = located_span(expr);
             self.push_mismatch(diag);
+        }
+    }
+
+    /// Check enum values in an IN / NOT IN list against enum labels (#129)
+    pub(super) fn check_in_list(&mut self, expr: &Expr, list: &[Expr]) {
+        let expr_type = self.infer_expr_type(expr);
+        let span = located_span(expr);
+        let column = self.column_label(expr);
+        for item in list {
+            let item_type = self.infer_expr_type(item);
+            let item_span = span.or_else(|| located_span(item));
+            let item_column = column.clone().or_else(|| self.column_label(item));
+            self.report_enum_literal(&expr_type, &item_type, item_column, item_span, false);
         }
     }
 
@@ -342,9 +371,11 @@ impl Resolver<'_> {
         // An interval or date/time operand with a numeric one is fine only in the
         // combinations allowed above; otherwise report each non-numeric side
         // (Snowflake converts a string operand to a number at run time)
+        let mut non_numeric = false;
         for (ty, expr) in [(lt, left), (rt, right)] {
             let numeric = ty.is_numeric() || (self.dialect.coerces_strings() && ty.is_string());
             if !numeric {
+                non_numeric = true;
                 self.push_mismatch(
                     Diagnostic::error(
                         DiagnosticKind::TypeMismatch,
@@ -356,6 +387,34 @@ impl Resolver<'_> {
                     .with_span(Span::from_sqlparser(&expr.span())),
                 );
             }
+        }
+        if non_numeric {
+            return;
+        }
+
+        // E0032 integer-division: / between integers truncates toward zero
+        if arith_op == ArithmeticOp::Divide
+            && self.dialect.division_truncates_integers()
+            && lt.is_integer()
+            && rt.is_integer()
+            && (has_column_or_aggregate(left) || has_column_or_aggregate(right))
+        {
+            let span = located_span(left)
+                .or_else(|| located_span(right))
+                .or_else(|| {
+                    (left.span().start.line > 0).then(|| Span::from_sqlparser(&left.span()))
+                });
+            let mut diag = Diagnostic::warning(
+                DiagnosticKind::IntegerDivision,
+                format!(
+                    "Division of integer columns truncates toward zero: {} / {} produces an integer",
+                    lt.display_name_in(self.dialect),
+                    rt.display_name_in(self.dialect),
+                ),
+            )
+            .with_help("Cast an operand to NUMERIC or FLOAT if a ratio or average is meant: CAST(x AS NUMERIC) / y");
+            diag.span = span;
+            self.diagnostics.push(diag);
         }
     }
 
@@ -509,6 +568,19 @@ impl Resolver<'_> {
                 }
                 if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
                     let mut diag = assignment_mismatch(col_name, &expected, &actual);
+                    if let (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) =
+                        (&column_type, &value_type)
+                    {
+                        if matches!(
+                            t,
+                            SqlType::Date | SqlType::Timestamp { .. } | SqlType::Time { .. }
+                        ) {
+                            diag = diag.with_help(format!(
+                                "'{lit}' is not a valid {}",
+                                t.display_name_in(self.dialect)
+                            ));
+                        }
+                    }
                     // Literals carry no location: fall back to the target column
                     diag.span = located_span(value_expr).or(column_span);
                     if self.assignment_rejected(&column_type, &value_type) {
@@ -580,6 +652,19 @@ impl Resolver<'_> {
             }
             if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
                 let mut diag = assignment_mismatch(&target.ident().value, &expected, &actual);
+                if let (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) =
+                    (&column_type, &value_type)
+                {
+                    if matches!(
+                        t,
+                        SqlType::Date | SqlType::Timestamp { .. } | SqlType::Time { .. }
+                    ) {
+                        diag = diag.with_help(format!(
+                            "'{lit}' is not a valid {}",
+                            t.display_name_in(self.dialect)
+                        ));
+                    }
+                }
                 // Literals carry no location: fall back to the target column
                 diag.span = located_span(&assignment.value).or(Some(target_span));
                 if self.assignment_rejected(&column_type, &value_type) {
@@ -629,6 +714,12 @@ impl Resolver<'_> {
                 ExpressionType::of_column(&SqlType::from_ast_in(data_type, self.dialect))
             }
             Expr::Function(func) => self.infer_function_return_type(func),
+            Expr::Ceil { expr: inner, .. } | Expr::Floor { expr: inner, .. } => {
+                match self.infer_expr_type(inner) {
+                    ExpressionType::Known(ty) if ty.is_numeric() => ExpressionType::Known(ty),
+                    _ => ExpressionType::Unknown,
+                }
+            }
             Expr::Interval(_) => ExpressionType::Known(SqlType::Interval),
             Expr::Case {
                 conditions,
@@ -1097,6 +1188,28 @@ fn is_coercible_pair(a: &SqlType, b: &SqlType) -> bool {
 /// Whether one side is BOOLEAN and the other an integer type
 fn is_integer_boolean_pair(a: &SqlType, b: &SqlType) -> bool {
     (*a == SqlType::Boolean && b.is_integer()) || (*b == SqlType::Boolean && a.is_integer())
+}
+
+/// Whether an expression references a column or an aggregate function
+fn has_column_or_aggregate(expr: &Expr) -> bool {
+    struct Finder {
+        found: bool,
+    }
+    impl Visitor for Finder {
+        type Break = ();
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+            match expr {
+                Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Function(_) => {
+                    self.found = true;
+                    ControlFlow::Break(())
+                }
+                _ => ControlFlow::Continue(()),
+            }
+        }
+    }
+    let mut finder = Finder { found: false };
+    let _ = expr.visit(&mut finder);
+    finder.found
 }
 
 #[cfg(test)]

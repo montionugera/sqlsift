@@ -169,6 +169,16 @@ impl SqlDialect {
         matches!(self, SqlDialect::BigQuery | SqlDialect::Databricks)
     }
 
+    /// Whether `/` between two integers performs integer division (truncating toward zero).
+    /// In PostgreSQL, SQLite and Redshift, `1 / 2` evaluates to 0. In MySQL, BigQuery,
+    /// Snowflake and Databricks, `/` returns a float or decimal.
+    pub fn division_truncates_integers(self) -> bool {
+        matches!(
+            self,
+            SqlDialect::PostgreSQL | SqlDialect::SQLite | SqlDialect::Redshift
+        )
+    }
+
     /// Whether query text may contain psql meta-commands and `:variables`
     /// (rewritten by [`crate::psql::preprocess`])
     pub(crate) fn is_psql(self) -> bool {
