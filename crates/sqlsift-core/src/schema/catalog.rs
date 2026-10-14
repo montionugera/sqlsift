@@ -722,6 +722,7 @@ impl std::fmt::Display for QualifiedName {
 
 /// Table definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct TableDef {
     pub name: QualifiedName,
     pub columns: IndexMap<String, ColumnDef>,
@@ -745,6 +746,9 @@ pub struct TableDef {
     /// UPDATE may set NOT NULL columns to NULL
     #[serde(default)]
     pub before_update_trigger: bool,
+    /// Whether this table was created with STRICT typing (SQLite STRICT tables)
+    #[serde(default)]
+    pub strict: bool,
 }
 
 /// A column that ALTER TABLE renamed or dropped
@@ -773,6 +777,7 @@ impl TableDef {
             unknown_unique_keys: false,
             before_insert_trigger: false,
             before_update_trigger: false,
+            strict: false,
         }
     }
 

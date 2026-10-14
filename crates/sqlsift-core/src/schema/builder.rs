@@ -950,6 +950,20 @@ impl SchemaBuilder {
             return;
         }
         let mut table = TableDef::new(name.clone());
+        table.strict = create.strict
+            || match &create.table_options {
+                sqlparser::ast::CreateTableOptions::Plain(opts)
+                | sqlparser::ast::CreateTableOptions::With(opts)
+                | sqlparser::ast::CreateTableOptions::Options(opts) => {
+                    opts.iter().any(|opt| match opt {
+                        sqlparser::ast::SqlOption::Ident(ident) => {
+                            ident.value.eq_ignore_ascii_case("STRICT")
+                        }
+                        _ => false,
+                    })
+                }
+                _ => false,
+            };
 
         // MySQL `CREATE TABLE t2 LIKE t`: copy the definition
         let like = create.like.as_ref().map(|like| match like {
@@ -969,6 +983,7 @@ impl SchemaBuilder {
                     table
                         .check_constraints
                         .clone_from(&source_table.check_constraints);
+                    table.strict = source_table.strict;
                 }
                 None => self.warn_like_source_missing(&name, &source),
             }

@@ -99,7 +99,7 @@ impl Resolver<'_> {
         // MySQL compares an enum with any string (and strict mode rejects an
         // invalid value only when it is assigned)
         if self.dialect.converts_mismatched_types()
-            && !(assignment && self.assignment_rejected(left, right))
+            && !(assignment && self.assignment_rejected(left, right, false))
         {
             diag.kind = DiagnosticKind::ImplicitConversion;
         }
@@ -136,10 +136,15 @@ impl Resolver<'_> {
     /// Whether the database rejects assigning `value` to a column of type `column`
     /// that [`Self::type_conflict`] reported. MySQL (in its default strict mode)
     /// rejects only a string that isn't a value of the column's type; SQLite
-    /// stores any value
-    fn assignment_rejected(&self, column: &ExpressionType, value: &ExpressionType) -> bool {
+    /// stores any value, except in a STRICT table where type mismatches are rejected at run time
+    fn assignment_rejected(
+        &self,
+        column: &ExpressionType,
+        value: &ExpressionType,
+        table_strict: bool,
+    ) -> bool {
         match self.dialect {
-            SqlDialect::SQLite => false,
+            SqlDialect::SQLite => table_strict,
             SqlDialect::MySQL => matches!(
                 (column, value),
                 (ExpressionType::Known(_), ExpressionType::StringLiteral(_))
@@ -238,6 +243,7 @@ impl Resolver<'_> {
         &self,
         column_type: &ExpressionType,
         value_type: &ExpressionType,
+        table_strict: bool,
     ) -> Option<(String, String)> {
         if let (ExpressionType::Known(col_type), ExpressionType::Known(val_type)) =
             (column_type, value_type)
@@ -247,6 +253,53 @@ impl Resolver<'_> {
             // reverse or a comparison requires an explicit cast
             if col_type.is_string() && self.is_enum_type(val_type) {
                 return None;
+            }
+            if self.dialect == SqlDialect::SQLite && table_strict {
+                // SQLite STRICT tables reject storing REAL / NUMERIC into an INTEGER column
+                if col_type.is_integer()
+                    && matches!(
+                        val_type,
+                        SqlType::Real | SqlType::DoublePrecision | SqlType::Decimal { .. }
+                    )
+                {
+                    return Some((
+                        col_type.display_name_in(self.dialect),
+                        val_type.display_name_in(self.dialect),
+                    ));
+                }
+            }
+        }
+        if self.dialect == SqlDialect::SQLite && table_strict {
+            if let (ExpressionType::Known(col_type), ExpressionType::StringLiteral(lit)) =
+                (column_type, value_type)
+            {
+                if col_type.is_integer() {
+                    if lit.trim().parse::<i128>().is_err() {
+                        return Some((
+                            col_type.display_name_in(self.dialect),
+                            SqlType::Text.display_name_in(self.dialect),
+                        ));
+                    }
+                    return None;
+                }
+                if matches!(
+                    col_type,
+                    SqlType::Real | SqlType::DoublePrecision | SqlType::Decimal { .. }
+                ) {
+                    if lit.trim().parse::<f64>().is_err() {
+                        return Some((
+                            col_type.display_name_in(self.dialect),
+                            SqlType::Text.display_name_in(self.dialect),
+                        ));
+                    }
+                    return None;
+                }
+                if matches!(col_type, SqlType::Bytea) {
+                    return Some((
+                        col_type.display_name_in(self.dialect),
+                        SqlType::Text.display_name_in(self.dialect),
+                    ));
+                }
             }
         }
         self.type_conflict(column_type, value_type)
@@ -668,7 +721,7 @@ impl Resolver<'_> {
                     continue;
                 }
                 if let Some((expected, actual)) =
-                    self.assignment_conflict(&column_type, &value_type)
+                    self.assignment_conflict(&column_type, &value_type, table_def.strict)
                 {
                     let mut diag = assignment_mismatch(col_name, &expected, &actual);
                     if let (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) =
@@ -686,7 +739,7 @@ impl Resolver<'_> {
                     }
                     // Literals carry no location: fall back to the target column
                     diag.span = located_span(value_expr).or(column_span);
-                    if self.assignment_rejected(&column_type, &value_type) {
+                    if self.assignment_rejected(&column_type, &value_type, table_def.strict) {
                         self.diagnostics.push(diag);
                     } else {
                         self.push_mismatch(diag);
@@ -761,7 +814,9 @@ impl Resolver<'_> {
             ) {
                 continue;
             }
-            if let Some((expected, actual)) = self.assignment_conflict(&column_type, &value_type) {
+            if let Some((expected, actual)) =
+                self.assignment_conflict(&column_type, &value_type, table_def.strict)
+            {
                 let mut diag = assignment_mismatch(&target.ident().value, &expected, &actual);
                 if let (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) =
                     (&column_type, &value_type)
@@ -778,7 +833,7 @@ impl Resolver<'_> {
                 }
                 // Literals carry no location: fall back to the target column
                 diag.span = located_span(&assignment.value).or(Some(target_span));
-                if self.assignment_rejected(&column_type, &value_type) {
+                if self.assignment_rejected(&column_type, &value_type, table_def.strict) {
                     self.diagnostics.push(diag);
                 } else {
                     self.push_mismatch(diag);
