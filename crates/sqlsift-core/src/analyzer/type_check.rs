@@ -606,6 +606,9 @@ impl Resolver<'_> {
                 .map(|c| column_ident(c).value.as_str())
                 .collect()
         };
+        let table_fallback = insert_table(insert)
+            .and_then(name_last)
+            .map(|t| Span::from_sqlparser(&t.span));
 
         for row in rows {
             for (i, value_expr) in row.iter().enumerate().take(target_columns.len()) {
@@ -708,6 +711,7 @@ impl Resolver<'_> {
                 );
                 self.check_value_range(&table_def.name, col_def, value_expr, fallback);
             }
+            self.check_insert_check_constraints(table_def, row, &target_columns, table_fallback);
         }
     }
 
@@ -800,6 +804,7 @@ impl Resolver<'_> {
                 Some(target_span),
             );
         }
+        self.check_update_check_constraints(table_def, assignments);
     }
 
     // ---------------------------------------------------------------------
