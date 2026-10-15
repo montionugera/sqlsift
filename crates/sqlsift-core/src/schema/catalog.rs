@@ -965,11 +965,17 @@ pub struct UniqueConstraintDef {
     pub deferrable: bool,
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 /// CHECK constraint
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckConstraintDef {
     pub name: Option<String>,
     pub expression: String,
+    #[serde(default = "default_true")]
+    pub enforced: bool,
 }
 
 /// Enum type definition (CREATE TYPE ... AS ENUM)

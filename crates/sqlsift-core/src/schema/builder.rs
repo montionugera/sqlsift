@@ -562,7 +562,9 @@ impl SchemaBuilder {
     /// [`mask_unsupported_clauses`] removes, applying `INHERITS` itself. Returns true
     /// if something was removed and the statement then parsed and was applied.
     fn retry_without_unsupported_clauses(&mut self, stmt: &str) -> bool {
-        let Some((masked, parents)) = mask_unsupported_clauses(self.dialect, stmt, true) else {
+        let Some((masked, parents, include_constraints)) =
+            mask_unsupported_clauses(self.dialect, stmt, true)
+        else {
             return false;
         };
         let dialect = self.dialect.parser_dialect();
@@ -575,6 +577,25 @@ impl SchemaBuilder {
                 if !parents.is_empty() {
                     let child = self.catalog.qualified_name(&create.name);
                     self.inherit_columns(&child, &parents);
+                }
+                if include_constraints {
+                    let child = self.catalog.qualified_name(&create.name);
+                    let like_source = match &create.like {
+                        Some(
+                            CreateTableLikeKind::Parenthesized(like)
+                            | CreateTableLikeKind::Plain(like),
+                        ) => Some(&like.name),
+                        _ => create.columns.iter().find_map(like_pseudo_column),
+                    };
+                    if let Some(source_name) = like_source {
+                        let source = self.catalog.qualified_name(source_name);
+                        if let Some(source_table) = self.catalog.get_table(&source) {
+                            let check_constraints = source_table.check_constraints.clone();
+                            if let Some(child_table) = self.catalog.get_table_mut(&child) {
+                                child_table.check_constraints.extend(check_constraints);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -952,23 +973,25 @@ impl SchemaBuilder {
         let mut table = TableDef::new(name.clone());
 
         // MySQL `CREATE TABLE t2 LIKE t`: copy the definition
-        let like = create.like.as_ref().map(|like| match like {
-            CreateTableLikeKind::Parenthesized(like) | CreateTableLikeKind::Plain(like) => {
-                &like.name
-            }
-        });
-        if let Some(like) = like.or(create.clone.as_ref()) {
+        let (like, is_mysql_like) = match &create.like {
+            Some(CreateTableLikeKind::Plain(like)) => (Some(&like.name), true),
+            Some(CreateTableLikeKind::Parenthesized(like)) => (Some(&like.name), false),
+            None => (create.clone.as_ref(), false),
+        };
+        if let Some(like) = like {
             let source = self.catalog.qualified_name(like);
             match self.catalog.get_table(&source) {
                 Some(source_table) => {
                     table.columns.clone_from(&source_table.columns);
-                    table.primary_key.clone_from(&source_table.primary_key);
-                    table
-                        .unique_constraints
-                        .clone_from(&source_table.unique_constraints);
-                    table
-                        .check_constraints
-                        .clone_from(&source_table.check_constraints);
+                    if is_mysql_like {
+                        table.primary_key.clone_from(&source_table.primary_key);
+                        table
+                            .unique_constraints
+                            .clone_from(&source_table.unique_constraints);
+                        table
+                            .check_constraints
+                            .clone_from(&source_table.check_constraints);
+                    }
                 }
                 None => self.warn_like_source_missing(&name, &source),
             }
@@ -1225,6 +1248,7 @@ impl SchemaBuilder {
                     | AlterTableOperation::RenameColumn { .. }
                     | AlterTableOperation::RenameTable { .. }
                     | AlterTableOperation::AddConstraint { .. }
+                    | AlterTableOperation::DropConstraint { .. }
                     | AlterTableOperation::AlterColumn { .. }
                     | AlterTableOperation::ChangeColumn { .. }
                     | AlterTableOperation::ModifyColumn { .. }
@@ -1381,6 +1405,33 @@ impl SchemaBuilder {
                         merge_constraints(table, constraints);
                     }
                 }
+                AlterTableOperation::DropConstraint { name, .. } => {
+                    if let Some(table) = self.catalog.get_table_mut(&table_name) {
+                        table.check_constraints.retain(|c| {
+                            !c.name
+                                .as_deref()
+                                .is_some_and(|n| n.eq_ignore_ascii_case(&name.value))
+                        });
+                        table.unique_constraints.retain(|u| {
+                            !u.name
+                                .as_deref()
+                                .is_some_and(|n| n.eq_ignore_ascii_case(&name.value))
+                        });
+                        table.foreign_keys.retain(|fk| {
+                            !fk.name
+                                .as_deref()
+                                .is_some_and(|n| n.eq_ignore_ascii_case(&name.value))
+                        });
+                        if table
+                            .primary_key
+                            .as_ref()
+                            .and_then(|pk| pk.name.as_deref())
+                            .is_some_and(|n| n.eq_ignore_ascii_case(&name.value))
+                        {
+                            table.primary_key = None;
+                        }
+                    }
+                }
                 _ => {
                     // Other ALTER TABLE operations - not yet supported
                 }
@@ -1474,6 +1525,7 @@ impl SchemaBuilder {
                 let check = CheckConstraintDef {
                     name: check.name.as_ref().map(|n| n.value.clone()),
                     expression: check.expr.to_string(),
+                    enforced: check.enforced.unwrap_or(true),
                 };
                 table.check_constraints.push(check);
             }
@@ -1564,6 +1616,7 @@ fn build_column(
                 constraints.check_constraints.push(CheckConstraintDef {
                     name: constraint_name,
                     expression: check.expr.to_string(),
+                    enforced: check.enforced.unwrap_or(true),
                 });
             }
             ColumnOption::Generated {
@@ -1778,7 +1831,7 @@ pub(crate) fn mask_unsupported_clauses(
     dialect: SqlDialect,
     stmt: &str,
     inherits: bool,
-) -> Option<(String, Vec<ObjectName>)> {
+) -> Option<(String, Vec<ObjectName>, bool)> {
     let parser_dialect = dialect.parser_dialect();
     let tokens = Tokenizer::new(parser_dialect.as_ref(), stmt)
         .with_unescape(false)
@@ -1805,12 +1858,20 @@ pub(crate) fn mask_unsupported_clauses(
     if word(1, "UNLOGGED") && word(2, "TABLE") {
         drop[significant[1]] = true;
     }
+    let mut include_constraints = false;
     for (n, &i) in significant.iter().enumerate() {
-        if is_word(&tokens[i].token, "INCLUDING") || is_word(&tokens[i].token, "EXCLUDING") {
+        let is_inc = is_word(&tokens[i].token, "INCLUDING");
+        let is_exc = is_word(&tokens[i].token, "EXCLUDING");
+        if is_inc || is_exc {
             if let Some(&next) = significant.get(n + 1) {
-                if matches!(tokens[next].token, Token::Word(_)) {
+                if let Token::Word(w) = &tokens[next].token {
                     drop[i] = true;
                     drop[next] = true;
+                    if w.value.eq_ignore_ascii_case("CONSTRAINTS")
+                        || w.value.eq_ignore_ascii_case("ALL")
+                    {
+                        include_constraints = is_inc;
+                    }
                 }
             }
         }
@@ -1921,7 +1982,7 @@ pub(crate) fn mask_unsupported_clauses(
             None => c,
         })
         .collect();
-    Some((masked, parents))
+    Some((masked, parents, include_constraints))
 }
 
 /// Mark for dropping the parts of a CREATE TABLE's column and constraint list that

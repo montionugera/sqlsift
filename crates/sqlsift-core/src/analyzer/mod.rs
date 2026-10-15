@@ -867,7 +867,7 @@ impl<'a> Analyzer<'a> {
                 Err(error) => error,
             };
             let retried = mask_unsupported_clauses(self.dialect, text, false)
-                .and_then(|(masked, _)| Parser::parse_sql(dialect.as_ref(), &masked).ok())
+                .and_then(|(masked, _, _)| Parser::parse_sql(dialect.as_ref(), &masked).ok())
                 .or_else(|| match self.dialect {
                     // `t.$1` positional columns
                     SqlDialect::Snowflake => {

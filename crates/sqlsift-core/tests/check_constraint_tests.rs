@@ -10,7 +10,7 @@ CREATE TABLE users (
     id INT PRIMARY KEY,
     age INT CONSTRAINT users_age_check CHECK (age >= 0),
     status TEXT CONSTRAINT users_status_check CHECK (status IN ('active', 'banned')),
-    bio TEXT CHECK (length(bio) <= 20)
+    role TEXT CHECK (role <> 'banned_role')
 );
 
 CREATE TABLE ranges (
@@ -29,8 +29,12 @@ CREATE TABLE orders (
 ";
 
 fn codes_in(dialect: SqlDialect, sql: &str) -> Vec<&'static str> {
+    codes_with_schema(dialect, SCHEMA, sql)
+}
+
+fn codes_with_schema(dialect: SqlDialect, schema: &str, sql: &str) -> Vec<&'static str> {
     let mut builder = SchemaBuilder::with_dialect(dialect);
-    builder.parse(SCHEMA).expect("schema parses");
+    builder.parse(schema).expect("schema parses");
     let catalog = builder.build().0;
     Analyzer::with_dialect(&catalog, dialect)
         .analyze(sql)
@@ -72,8 +76,8 @@ fn update_set_violates_check() {
 
 #[test]
 fn positional_insert_without_columns() {
-    assert_reports("INSERT INTO users VALUES (1, -5, 'active', 'hello')");
-    assert_clean("INSERT INTO users VALUES (1, 20, 'active', 'hello')");
+    assert_reports("INSERT INTO users VALUES (1, -5, 'active', 'user')");
+    assert_clean("INSERT INTO users VALUES (1, 20, 'active', 'user')");
 }
 
 #[test]
@@ -118,18 +122,150 @@ fn between_and_in_list_checks() {
 }
 
 #[test]
-fn string_length_check() {
-    assert_reports(
-        "INSERT INTO users (id, bio) VALUES (1, 'This bio is way too long for twenty chars!')",
+fn string_equality_check() {
+    assert_reports("INSERT INTO users (id, role) VALUES (1, 'banned_role')");
+    assert_clean("INSERT INTO users (id, role) VALUES (1, 'user')");
+}
+
+#[test]
+fn drop_constraint_removes_check() {
+    let schema = "
+    CREATE TABLE accounts (
+        id INT PRIMARY KEY,
+        balance INT CONSTRAINT acc_balance_check CHECK (balance >= 0)
     );
-    assert_clean("INSERT INTO users (id, bio) VALUES (1, 'Short bio')");
+    ALTER TABLE accounts DROP CONSTRAINT acc_balance_check;
+    ";
+    let diags = codes_with_schema(
+        SqlDialect::PostgreSQL,
+        schema,
+        "INSERT INTO accounts (id, balance) VALUES (1, -50)",
+    );
+    assert_eq!(diags, Vec::<&str>::new());
+}
+
+#[test]
+fn create_table_like_constraints_copied_only_with_including_constraints() {
+    let schema = "
+    CREATE TABLE base_items (
+        id INT PRIMARY KEY,
+        qty INT CHECK (qty > 0)
+    );
+    CREATE TABLE copy_plain (LIKE base_items);
+    CREATE TABLE copy_with_chk (LIKE base_items INCLUDING CONSTRAINTS);
+    ";
+    // Plain LIKE in PostgreSQL excludes constraints: no violation
+    let diags_plain = codes_with_schema(
+        SqlDialect::PostgreSQL,
+        schema,
+        "INSERT INTO copy_plain (id, qty) VALUES (1, -1)",
+    );
+    assert_eq!(diags_plain, Vec::<&str>::new());
+
+    // LIKE INCLUDING CONSTRAINTS copies check constraints: reports violation
+    let diags_with_chk = codes_with_schema(
+        SqlDialect::PostgreSQL,
+        schema,
+        "INSERT INTO copy_with_chk (id, qty) VALUES (1, -1)",
+    );
+    assert_eq!(diags_with_chk, vec!["E0037"]);
+}
+
+#[test]
+fn not_enforced_check_constraint_is_skipped() {
+    let schema = "
+    CREATE TABLE items (
+        id INT PRIMARY KEY,
+        qty INT CHECK (qty > 0) NOT ENFORCED
+    );
+    ";
+    let diags = codes_with_schema(
+        SqlDialect::MySQL,
+        schema,
+        "INSERT INTO items (id, qty) VALUES (1, -1)",
+    );
+    assert_eq!(diags, Vec::<&str>::new());
+}
+
+#[test]
+fn mysql_skips_string_comparisons() {
+    // In MySQL, default collation is case-insensitive, so string comparisons stay quiet
+    let sql = "UPDATE users SET status = 'actve' WHERE id = 1";
+    assert_eq!(
+        codes_in(SqlDialect::MySQL, sql),
+        Vec::<&str>::new(),
+        "MySQL string comparisons should stay quiet"
+    );
+    // In PostgreSQL, string comparisons are checked
+    assert_eq!(codes_in(SqlDialect::PostgreSQL, sql), vec!["E0037"]);
+}
+
+#[test]
+fn literal_converted_to_column_type_edge_cases() {
+    let schema = "
+    CREATE TABLE edge_cases (
+        i INT CHECK (i > 0),
+        c TEXT CHECK (c <> '07'),
+        n NUMERIC(10, 2) CHECK (n > 0.01),
+        d DATE CHECK (d > '2020-01-01')
+    );
+    ";
+    // 2.6 into INT: float is not converted, stays quiet for E0037
+    assert!(!codes_with_schema(
+        SqlDialect::PostgreSQL,
+        schema,
+        "INSERT INTO edge_cases (i) VALUES (2.6)"
+    )
+    .contains(&"E0037"));
+
+    // Integer 7 into TEXT: number not converted to string, stays quiet for E0037
+    assert!(!codes_with_schema(
+        SqlDialect::PostgreSQL,
+        schema,
+        "INSERT INTO edge_cases (c) VALUES (7)"
+    )
+    .contains(&"E0037"));
+
+    // 0.005 into NUMERIC(10,2): exceeds column scale (rounded by database), stays quiet for E0037
+    assert!(!codes_with_schema(
+        SqlDialect::PostgreSQL,
+        schema,
+        "INSERT INTO edge_cases (n) VALUES (0.005)"
+    )
+    .contains(&"E0037"));
+
+    // Exact numeric comparison within scale: violates n > 0.01
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            schema,
+            "INSERT INTO edge_cases (n) VALUES (0.00)"
+        ),
+        vec!["E0037"]
+    );
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            schema,
+            "INSERT INTO edge_cases (n) VALUES (0.05)"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // DATE column: not plain integer, numeric or text, stays quiet for E0037
+    assert!(!codes_with_schema(
+        SqlDialect::PostgreSQL,
+        schema,
+        "INSERT INTO edge_cases (d) VALUES ('2019-01-01')"
+    )
+    .contains(&"E0037"));
 }
 
 #[test]
 fn dialect_enforcement() {
     let sql = "INSERT INTO users (id, age) VALUES (1, -1)";
 
-    // PostgreSQL, MySQL, and SQLite enforce CHECK constraints
+    // PostgreSQL, MySQL, and SQLite enforce integer CHECK constraints
     assert_eq!(codes_in(SqlDialect::PostgreSQL, sql), vec!["E0037"]);
     assert_eq!(codes_in(SqlDialect::MySQL, sql), vec!["E0037"]);
     assert_eq!(codes_in(SqlDialect::SQLite, sql), vec!["E0037"]);

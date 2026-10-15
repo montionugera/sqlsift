@@ -124,7 +124,12 @@ impl Resolver<'_> {
         assigned_columns: &HashMap<String, (&Expr, Option<Span>)>,
         fallback: Option<Span>,
     ) {
-        for check in &table_def.check_constraints {
+        'check_loop: for check in &table_def.check_constraints {
+            // Skip NOT ENFORCED constraints
+            if !check.enforced {
+                continue;
+            }
+
             let Ok(expr) = Parser::new(self.dialect.parser_dialect().as_ref())
                 .try_with_sql(&check.expression)
                 .and_then(|mut p| p.parse_expr())
@@ -139,6 +144,16 @@ impl Resolver<'_> {
                 continue;
             }
 
+            // Only evaluate plain integer, numeric, and text columns
+            for col_name in &referenced_cols {
+                let Some(col_def) = table_def.columns.get(col_name) else {
+                    continue 'check_loop;
+                };
+                if !is_plain_integer_numeric_or_text(&col_def.data_type) {
+                    continue 'check_loop;
+                }
+            }
+
             // Only evaluate when every column the CHECK expression reads is assigned
             if !referenced_cols
                 .iter()
@@ -150,7 +165,9 @@ impl Resolver<'_> {
             let mut env = HashMap::new();
             for col_name in &referenced_cols {
                 let (val_expr, _) = assigned_columns[col_name];
-                let const_val = eval_expr(val_expr, &HashMap::new(), self.dialect);
+                let col_def = &table_def.columns[col_name];
+                let const_val =
+                    convert_literal_to_column_type(val_expr, &col_def.data_type, self.dialect);
                 env.insert(col_name.clone(), const_val);
             }
 
@@ -364,14 +381,113 @@ fn collect_referenced_columns(expr: &Expr, columns: &mut HashSet<String>) {
     }
 }
 
+fn is_plain_integer_numeric_or_text(col_type: &SqlType) -> bool {
+    col_type.is_integer()
+        || matches!(col_type, SqlType::Decimal { .. })
+        || matches!(col_type, SqlType::Text | SqlType::Varchar { .. })
+}
+
+fn convert_literal_to_column_type(
+    expr: &Expr,
+    col_type: &SqlType,
+    dialect: SqlDialect,
+) -> EvalValue {
+    if matches!(
+        expr,
+        Expr::Value(ValueWithSpan {
+            value: Value::Null,
+            ..
+        })
+    ) {
+        return EvalValue::Null;
+    }
+
+    match col_type {
+        t if t.is_integer() => {
+            // Integer column: convert literal only if it is an integer
+            let val = eval_expr(expr, &HashMap::new(), dialect);
+            match val {
+                EvalValue::Int(n) => EvalValue::Int(n),
+                _ => EvalValue::Unknown,
+            }
+        }
+        SqlType::Decimal { scale, .. } => {
+            // Plain numeric column: integer or decimal within scale
+            let val = eval_expr(expr, &HashMap::new(), dialect);
+            match val {
+                EvalValue::Int(n) => EvalValue::Decimal {
+                    mantissa: n,
+                    scale: 0,
+                },
+                EvalValue::Decimal {
+                    mantissa,
+                    scale: val_scale,
+                } => {
+                    if let Some(col_scale) = scale {
+                        if u64::from(val_scale) > *col_scale {
+                            // Rounded by database; stay quiet
+                            return EvalValue::Unknown;
+                        }
+                    }
+                    EvalValue::Decimal {
+                        mantissa,
+                        scale: val_scale,
+                    }
+                }
+                _ => EvalValue::Unknown,
+            }
+        }
+        SqlType::Text | SqlType::Varchar { .. } => {
+            // Skip MySQL string comparisons
+            if dialect == SqlDialect::MySQL {
+                return EvalValue::Unknown;
+            }
+            match expr {
+                Expr::Value(ValueWithSpan {
+                    value: Value::SingleQuotedString(s),
+                    ..
+                }) => EvalValue::String(s.clone()),
+                _ => EvalValue::Unknown,
+            }
+        }
+        _ => EvalValue::Unknown,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum EvalValue {
     Null,
     Bool(bool),
     Int(i128),
-    Float(f64),
+    Decimal { mantissa: i128, scale: u32 },
     String(String),
     Unknown,
+}
+
+fn parse_number(s: &str) -> EvalValue {
+    if s.contains(['e', 'E']) {
+        return EvalValue::Unknown;
+    }
+    let is_negative = s.starts_with('-');
+    let unsigned = s.trim_start_matches(['-', '+']);
+    if let Some((int_part, frac_part)) = unsigned.split_once('.') {
+        let Ok(scale) = u32::try_from(frac_part.len()) else {
+            return EvalValue::Unknown;
+        };
+        let combined = format!("{int_part}{frac_part}");
+        if let Ok(mut mantissa) = combined.parse::<i128>() {
+            if is_negative {
+                mantissa = -mantissa;
+            }
+            EvalValue::Decimal { mantissa, scale }
+        } else {
+            EvalValue::Unknown
+        }
+    } else if let Ok(n) = s.parse::<i128>() {
+        EvalValue::Int(n)
+    } else {
+        EvalValue::Unknown
+    }
 }
 
 fn eval_expr(expr: &Expr, env: &HashMap<String, EvalValue>, dialect: SqlDialect) -> EvalValue {
@@ -380,18 +496,7 @@ fn eval_expr(expr: &Expr, env: &HashMap<String, EvalValue>, dialect: SqlDialect)
             Value::Null => EvalValue::Null,
             Value::Boolean(b) => EvalValue::Bool(*b),
             Value::SingleQuotedString(s) => EvalValue::String(s.clone()),
-            Value::DoubleQuotedString(s) if dialect == SqlDialect::MySQL => {
-                EvalValue::String(s.clone())
-            }
-            Value::Number(s, _) => {
-                if let Ok(n) = s.parse::<i128>() {
-                    EvalValue::Int(n)
-                } else if let Ok(f) = s.parse::<f64>() {
-                    EvalValue::Float(f)
-                } else {
-                    EvalValue::Unknown
-                }
-            }
+            Value::Number(s, _) => parse_number(s),
             _ => EvalValue::Unknown,
         },
         Expr::Identifier(ident) => env
@@ -407,13 +512,20 @@ fn eval_expr(expr: &Expr, env: &HashMap<String, EvalValue>, dialect: SqlDialect)
             UnaryOperator::Not => eval_not(&eval_expr(expr, env, dialect)),
             UnaryOperator::Minus => match eval_expr(expr, env, dialect) {
                 EvalValue::Int(n) => n.checked_neg().map_or(EvalValue::Unknown, EvalValue::Int),
-                EvalValue::Float(f) => EvalValue::Float(-f),
+                EvalValue::Decimal { mantissa, scale } => {
+                    mantissa
+                        .checked_neg()
+                        .map_or(EvalValue::Unknown, |m| EvalValue::Decimal {
+                            mantissa: m,
+                            scale,
+                        })
+                }
                 EvalValue::Null => EvalValue::Null,
                 _ => EvalValue::Unknown,
             },
             UnaryOperator::Plus => match eval_expr(expr, env, dialect) {
                 EvalValue::Int(n) => EvalValue::Int(n),
-                EvalValue::Float(f) => EvalValue::Float(f),
+                EvalValue::Decimal { mantissa, scale } => EvalValue::Decimal { mantissa, scale },
                 EvalValue::Null => EvalValue::Null,
                 _ => EvalValue::Unknown,
             },
@@ -438,7 +550,7 @@ fn eval_expr(expr: &Expr, env: &HashMap<String, EvalValue>, dialect: SqlDialect)
             | BinaryOperator::GtEq => {
                 let l = eval_expr(left, env, dialect);
                 let r = eval_expr(right, env, dialect);
-                eval_comparison(op, &l, &r)
+                eval_comparison(op, &l, &r, dialect)
             }
             BinaryOperator::Plus | BinaryOperator::Minus | BinaryOperator::Multiply => {
                 let l = eval_expr(left, env, dialect);
@@ -456,11 +568,16 @@ fn eval_expr(expr: &Expr, env: &HashMap<String, EvalValue>, dialect: SqlDialect)
             if target == EvalValue::Unknown {
                 return EvalValue::Unknown;
             }
+            if let EvalValue::String(_) = &target {
+                if dialect == SqlDialect::MySQL {
+                    return EvalValue::Unknown;
+                }
+            }
             let mut has_null = target == EvalValue::Null;
             let mut all_false = true;
             for item in list {
                 let item_val = eval_expr(item, env, dialect);
-                match eval_comparison(&BinaryOperator::Eq, &target, &item_val) {
+                match eval_comparison(&BinaryOperator::Eq, &target, &item_val, dialect) {
                     EvalValue::Bool(true) => return EvalValue::Bool(!negated),
                     EvalValue::Null => {
                         has_null = true;
@@ -488,8 +605,8 @@ fn eval_expr(expr: &Expr, env: &HashMap<String, EvalValue>, dialect: SqlDialect)
             let val = eval_expr(expr, env, dialect);
             let l = eval_expr(low, env, dialect);
             let h = eval_expr(high, env, dialect);
-            let ge = eval_comparison(&BinaryOperator::GtEq, &val, &l);
-            let le = eval_comparison(&BinaryOperator::LtEq, &val, &h);
+            let ge = eval_comparison(&BinaryOperator::GtEq, &val, &l, dialect);
+            let le = eval_comparison(&BinaryOperator::LtEq, &val, &h, dialect);
             let and_res = eval_and(&ge, &le);
             if *negated {
                 eval_not(&and_res)
@@ -527,28 +644,6 @@ fn eval_expr(expr: &Expr, env: &HashMap<String, EvalValue>, dialect: SqlDialect)
             EvalValue::Null => EvalValue::Bool(true),
             _ => EvalValue::Unknown,
         },
-        Expr::Function(func) => {
-            let name = func.name.to_string();
-            if name.eq_ignore_ascii_case("length")
-                || name.eq_ignore_ascii_case("char_length")
-                || name.eq_ignore_ascii_case("character_length")
-            {
-                if let FunctionArguments::List(ref arg_list) = func.args {
-                    if arg_list.args.len() == 1 {
-                        if let FunctionArg::Unnamed(FunctionArgExpr::Expr(ref arg_expr)) =
-                            arg_list.args[0]
-                        {
-                            return match eval_expr(arg_expr, env, dialect) {
-                                EvalValue::String(s) => EvalValue::Int(s.chars().count() as i128),
-                                EvalValue::Null => EvalValue::Null,
-                                _ => EvalValue::Unknown,
-                            };
-                        }
-                    }
-                }
-            }
-            EvalValue::Unknown
-        }
         _ => EvalValue::Unknown,
     }
 }
@@ -581,8 +676,36 @@ fn eval_not(v: &EvalValue) -> EvalValue {
     }
 }
 
-#[allow(clippy::float_cmp, clippy::cast_precision_loss)]
-fn eval_comparison(op: &BinaryOperator, left: &EvalValue, right: &EvalValue) -> EvalValue {
+fn align_decimals(m1: i128, s1: u32, m2: i128, s2: u32) -> Option<(i128, i128)> {
+    match s1.cmp(&s2) {
+        std::cmp::Ordering::Equal => Some((m1, m2)),
+        std::cmp::Ordering::Less => {
+            let diff = s2 - s1;
+            if diff > 38 {
+                return None;
+            }
+            let factor = 10i128.checked_pow(diff)?;
+            let m1_scaled = m1.checked_mul(factor)?;
+            Some((m1_scaled, m2))
+        }
+        std::cmp::Ordering::Greater => {
+            let diff = s1 - s2;
+            if diff > 38 {
+                return None;
+            }
+            let factor = 10i128.checked_pow(diff)?;
+            let m2_scaled = m2.checked_mul(factor)?;
+            Some((m1, m2_scaled))
+        }
+    }
+}
+
+fn eval_comparison(
+    op: &BinaryOperator,
+    left: &EvalValue,
+    right: &EvalValue,
+    dialect: SqlDialect,
+) -> EvalValue {
     if *left == EvalValue::Null || *right == EvalValue::Null {
         return EvalValue::Null;
     }
@@ -599,7 +722,19 @@ fn eval_comparison(op: &BinaryOperator, left: &EvalValue, right: &EvalValue) -> 
             };
             EvalValue::Bool(res)
         }
-        (EvalValue::Float(a), EvalValue::Float(b)) => {
+        (
+            EvalValue::Decimal {
+                mantissa: m1,
+                scale: s1,
+            },
+            EvalValue::Decimal {
+                mantissa: m2,
+                scale: s2,
+            },
+        ) => {
+            let Some((a, b)) = align_decimals(*m1, *s1, *m2, *s2) else {
+                return EvalValue::Unknown;
+            };
             let res = match op {
                 BinaryOperator::Eq => a == b,
                 BinaryOperator::NotEq => a != b,
@@ -611,40 +746,55 @@ fn eval_comparison(op: &BinaryOperator, left: &EvalValue, right: &EvalValue) -> 
             };
             EvalValue::Bool(res)
         }
-        (EvalValue::Int(a), EvalValue::Float(b)) => {
-            let a = *a as f64;
+        (
+            EvalValue::Int(a),
+            EvalValue::Decimal {
+                mantissa: m2,
+                scale: s2,
+            },
+        ) => {
+            let Some((a, b)) = align_decimals(*a, 0, *m2, *s2) else {
+                return EvalValue::Unknown;
+            };
             let res = match op {
-                BinaryOperator::Eq => a == *b,
-                BinaryOperator::NotEq => a != *b,
-                BinaryOperator::Lt => a < *b,
-                BinaryOperator::LtEq => a <= *b,
-                BinaryOperator::Gt => a > *b,
-                BinaryOperator::GtEq => a >= *b,
+                BinaryOperator::Eq => a == b,
+                BinaryOperator::NotEq => a != b,
+                BinaryOperator::Lt => a < b,
+                BinaryOperator::LtEq => a <= b,
+                BinaryOperator::Gt => a > b,
+                BinaryOperator::GtEq => a >= b,
                 _ => return EvalValue::Unknown,
             };
             EvalValue::Bool(res)
         }
-        (EvalValue::Float(a), EvalValue::Int(b)) => {
-            let b = *b as f64;
+        (
+            EvalValue::Decimal {
+                mantissa: m1,
+                scale: s1,
+            },
+            EvalValue::Int(b),
+        ) => {
+            let Some((a, b)) = align_decimals(*m1, *s1, *b, 0) else {
+                return EvalValue::Unknown;
+            };
             let res = match op {
-                BinaryOperator::Eq => *a == b,
-                BinaryOperator::NotEq => *a != b,
-                BinaryOperator::Lt => *a < b,
-                BinaryOperator::LtEq => *a <= b,
-                BinaryOperator::Gt => *a > b,
-                BinaryOperator::GtEq => *a >= b,
+                BinaryOperator::Eq => a == b,
+                BinaryOperator::NotEq => a != b,
+                BinaryOperator::Lt => a < b,
+                BinaryOperator::LtEq => a <= b,
+                BinaryOperator::Gt => a > b,
+                BinaryOperator::GtEq => a >= b,
                 _ => return EvalValue::Unknown,
             };
             EvalValue::Bool(res)
         }
         (EvalValue::String(a), EvalValue::String(b)) => {
+            if dialect == SqlDialect::MySQL {
+                return EvalValue::Unknown;
+            }
             let res = match op {
                 BinaryOperator::Eq => a == b,
                 BinaryOperator::NotEq => a != b,
-                BinaryOperator::Lt => a < b,
-                BinaryOperator::LtEq => a <= b,
-                BinaryOperator::Gt => a > b,
-                BinaryOperator::GtEq => a >= b,
                 _ => return EvalValue::Unknown,
             };
             EvalValue::Bool(res)
@@ -657,29 +807,10 @@ fn eval_comparison(op: &BinaryOperator, left: &EvalValue, right: &EvalValue) -> 
             };
             EvalValue::Bool(res)
         }
-        (EvalValue::Int(a), EvalValue::String(s)) => {
-            if let Ok(b) = s.parse::<i128>() {
-                eval_comparison(op, &EvalValue::Int(*a), &EvalValue::Int(b))
-            } else if let Ok(b) = s.parse::<f64>() {
-                eval_comparison(op, &EvalValue::Float(*a as f64), &EvalValue::Float(b))
-            } else {
-                EvalValue::Unknown
-            }
-        }
-        (EvalValue::String(s), EvalValue::Int(b)) => {
-            if let Ok(a) = s.parse::<i128>() {
-                eval_comparison(op, &EvalValue::Int(a), &EvalValue::Int(*b))
-            } else if let Ok(a) = s.parse::<f64>() {
-                eval_comparison(op, &EvalValue::Float(a), &EvalValue::Float(*b as f64))
-            } else {
-                EvalValue::Unknown
-            }
-        }
         _ => EvalValue::Unknown,
     }
 }
 
-#[allow(clippy::cast_precision_loss)]
 fn eval_arithmetic(op: &BinaryOperator, left: &EvalValue, right: &EvalValue) -> EvalValue {
     if *left == EvalValue::Null || *right == EvalValue::Null {
         return EvalValue::Null;
@@ -693,24 +824,67 @@ fn eval_arithmetic(op: &BinaryOperator, left: &EvalValue, right: &EvalValue) -> 
             }
             _ => EvalValue::Unknown,
         },
-        (EvalValue::Float(a), EvalValue::Float(b)) => match op {
-            BinaryOperator::Plus => EvalValue::Float(a + b),
-            BinaryOperator::Minus => EvalValue::Float(a - b),
-            BinaryOperator::Multiply => EvalValue::Float(a * b),
+        (
+            EvalValue::Decimal {
+                mantissa: m1,
+                scale: s1,
+            },
+            EvalValue::Decimal {
+                mantissa: m2,
+                scale: s2,
+            },
+        ) => match op {
+            BinaryOperator::Plus => {
+                let Some((a, b)) = align_decimals(*m1, *s1, *m2, *s2) else {
+                    return EvalValue::Unknown;
+                };
+                let Some(mantissa) = a.checked_add(b) else {
+                    return EvalValue::Unknown;
+                };
+                EvalValue::Decimal {
+                    mantissa,
+                    scale: (*s1).max(*s2),
+                }
+            }
+            BinaryOperator::Minus => {
+                let Some((a, b)) = align_decimals(*m1, *s1, *m2, *s2) else {
+                    return EvalValue::Unknown;
+                };
+                let Some(mantissa) = a.checked_sub(b) else {
+                    return EvalValue::Unknown;
+                };
+                EvalValue::Decimal {
+                    mantissa,
+                    scale: (*s1).max(*s2),
+                }
+            }
+            BinaryOperator::Multiply => {
+                let Some(mantissa) = m1.checked_mul(*m2) else {
+                    return EvalValue::Unknown;
+                };
+                let Some(scale) = s1.checked_add(*s2) else {
+                    return EvalValue::Unknown;
+                };
+                EvalValue::Decimal { mantissa, scale }
+            }
             _ => EvalValue::Unknown,
         },
-        (EvalValue::Int(a), EvalValue::Float(b)) => match op {
-            BinaryOperator::Plus => EvalValue::Float(*a as f64 + b),
-            BinaryOperator::Minus => EvalValue::Float(*a as f64 - b),
-            BinaryOperator::Multiply => EvalValue::Float(*a as f64 * b),
-            _ => EvalValue::Unknown,
-        },
-        (EvalValue::Float(a), EvalValue::Int(b)) => match op {
-            BinaryOperator::Plus => EvalValue::Float(a + *b as f64),
-            BinaryOperator::Minus => EvalValue::Float(a - *b as f64),
-            BinaryOperator::Multiply => EvalValue::Float(a * *b as f64),
-            _ => EvalValue::Unknown,
-        },
+        (EvalValue::Int(a), EvalValue::Decimal { .. }) => eval_arithmetic(
+            op,
+            &EvalValue::Decimal {
+                mantissa: *a,
+                scale: 0,
+            },
+            right,
+        ),
+        (EvalValue::Decimal { .. }, EvalValue::Int(b)) => eval_arithmetic(
+            op,
+            left,
+            &EvalValue::Decimal {
+                mantissa: *b,
+                scale: 0,
+            },
+        ),
         _ => EvalValue::Unknown,
     }
 }
