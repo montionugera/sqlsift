@@ -551,7 +551,6 @@ fn load_dbt_catalogs(catalog: &mut Catalog, files: &[DbtCatalogFile]) -> Result<
     Ok(())
 }
 
-/// Build the catalog from the schema files. Schema warnings are printed to
 /// A schema file input with optional pre-loaded content (e.g. from git history)
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SchemaSource {

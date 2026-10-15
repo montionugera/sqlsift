@@ -1,6 +1,6 @@
 //! `sqlsift impact`: the queries a schema change breaks or fixes
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -64,10 +64,13 @@ fn schema_versions(schema_files: &[PathBuf], migrations: &[PathBuf]) -> SchemaVe
 
 /// Split the schema files when `--base` is used: schema files modified in place
 /// are loaded from git at the merge base revision for "before", while newly
-/// added files are left out of "before".
+/// added files are left out of "before". Migrations named on the command line
+/// are kept out of "before" as well.
 fn schema_versions_with_base(
     schema_files: &[PathBuf],
-    migrations: &[PathBuf],
+    explicit_migrations: &[PathBuf],
+    changed_schema_files: &[PathBuf],
+    renames: &HashMap<PathBuf, PathBuf>,
     base: &str,
 ) -> Result<SchemaVersions> {
     let toplevel = git(&["rev-parse", "--show-toplevel"])?;
@@ -78,27 +81,34 @@ fn schema_versions_with_base(
 
     let key = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let schema_keys: Vec<PathBuf> = schema_files.iter().map(|p| key(p)).collect();
-    let migration_keys: Vec<PathBuf> = migrations.iter().map(|p| key(p)).collect();
+    let explicit_keys: Vec<PathBuf> = explicit_migrations.iter().map(|p| key(p)).collect();
+    let changed_keys: HashSet<PathBuf> = changed_schema_files.iter().map(|p| key(p)).collect();
 
-    let mut after: Vec<SchemaSource> = schema_files.iter().map(SchemaSource::from).collect();
-    for (migration, k) in migrations.iter().zip(&migration_keys) {
-        if !schema_keys.contains(k) && !after.iter().any(|p| key(&p.path) == *k) {
-            after.push(migration.into());
-        }
-    }
+    let first = schema_keys
+        .iter()
+        .position(|k| explicit_keys.contains(k))
+        .unwrap_or(schema_files.len());
 
     let mut before: Vec<SchemaSource> = Vec::new();
-    for source in &after {
-        let k = key(&source.path);
-        if migration_keys.contains(&k) {
-            if let Some(content) = git_show(&root, merge_base, &source.path) {
+    for file in &schema_files[..first] {
+        let k = key(file);
+        if changed_keys.contains(&k) {
+            let old_path = renames.get(&k).map_or(file.as_path(), PathBuf::as_path);
+            if let Some(content) = git_show(&root, merge_base, old_path) {
                 before.push(SchemaSource {
-                    path: source.path.clone(),
+                    path: file.clone(),
                     content: Some(content),
                 });
             }
         } else {
-            before.push(source.clone());
+            before.push(file.into());
+        }
+    }
+
+    let mut after: Vec<SchemaSource> = schema_files.iter().map(SchemaSource::from).collect();
+    for (migration, k) in explicit_migrations.iter().zip(&explicit_keys) {
+        if !schema_keys.contains(k) && !after.iter().any(|p| key(&p.path) == *k) {
+            after.push(migration.into());
         }
     }
 
@@ -107,8 +117,13 @@ fn schema_versions_with_base(
 
 /// Retrieve the content of a file at a specific git revision
 fn git_show(root: &Path, rev: &str, path: &Path) -> Option<String> {
-    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let rel = canonical.strip_prefix(root).ok()?;
+    let rel = if let Ok(canonical) = fs::canonicalize(path) {
+        canonical.strip_prefix(root).ok()?.to_path_buf()
+    } else if path.is_relative() {
+        path.to_path_buf()
+    } else {
+        path.strip_prefix(root).ok()?.to_path_buf()
+    };
     let rel_str = rel.to_string_lossy().replace('\\', "/");
     let target = format!("{rev}:{rel_str}");
     let output = std::process::Command::new("git")
@@ -160,23 +175,33 @@ fn git(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// The schema files added or changed since the merge base of `base` and
-/// `HEAD` (`base` itself when git can't find one), in schema file order:
-/// committed, uncommitted and untracked changes
-fn changed_schema_files(base: &str, schema_files: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let root = PathBuf::from(git(&["rev-parse", "--show-toplevel"])?.trim_end());
+/// The schema files added, modified, or renamed since the merge base of `base`
+/// and `HEAD` (`base` itself when git can't find one), in schema file order.
+/// Also returns a map from canonical new paths to relative old paths for renames.
+fn changed_schema_files(
+    base: &str,
+    schema_files: &[PathBuf],
+) -> Result<(Vec<PathBuf>, HashMap<PathBuf, PathBuf>)> {
+    let toplevel = git(&["rev-parse", "--show-toplevel"])?;
+    let root = fs::canonicalize(PathBuf::from(toplevel.trim_end()))
+        .unwrap_or_else(|_| PathBuf::from(toplevel.trim_end()));
     // A shallow checkout (CI) may not have the history to find the merge
     // base: compare with the revision itself then (on a pull request's merge
     // commit, the base branch tip is the merge base anyway)
     let merge_base = git(&["merge-base", base, "HEAD"]).unwrap_or_else(|_| base.to_string());
     let diff = git(&[
+        "-C",
+        &root.to_string_lossy(),
         "diff",
-        "--name-only",
+        "--name-status",
         "-z",
+        "-M",
         "--diff-filter=AMR",
-        merge_base.trim_end(),
+        merge_base.trim(),
     ])?;
     let untracked = git(&[
+        "-C",
+        &root.to_string_lossy(),
         "ls-files",
         "--others",
         "--exclude-standard",
@@ -184,17 +209,39 @@ fn changed_schema_files(base: &str, schema_files: &[PathBuf]) -> Result<Vec<Path
         "--full-name",
         ":/",
     ])?;
-    let changed: Vec<PathBuf> = diff
-        .split('\0')
-        .chain(untracked.split('\0'))
-        .filter(|name| !name.is_empty())
-        .map(|name| fs::canonicalize(root.join(name)).unwrap_or_else(|_| root.join(name)))
-        .collect();
-    Ok(schema_files
+
+    let key = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut changed = HashSet::new();
+    let mut renames = HashMap::new();
+    let mut tokens = diff.split('\0');
+    while let Some(status) = tokens.next() {
+        if status.is_empty() {
+            continue;
+        }
+        if status.starts_with('R') {
+            if let (Some(old_path), Some(new_path)) = (tokens.next(), tokens.next()) {
+                let new_canonical = key(&root.join(new_path));
+                renames.insert(new_canonical.clone(), PathBuf::from(old_path));
+                changed.insert(new_canonical);
+            }
+        } else if let Some(path) = tokens.next() {
+            let canonical = key(&root.join(path));
+            changed.insert(canonical);
+        }
+    }
+    for name in untracked.split('\0') {
+        if !name.is_empty() {
+            let canonical = key(&root.join(name));
+            changed.insert(canonical);
+        }
+    }
+
+    let changed_files = schema_files
         .iter()
-        .filter(|path| fs::canonicalize(path).is_ok_and(|p| changed.contains(&p)))
+        .filter(|path| changed.contains(&key(path)))
         .cloned()
-        .collect())
+        .collect();
+    Ok((changed_files, renames))
 }
 
 /// Run `sqlsift impact`. Returns whether the change introduces errors.
@@ -204,25 +251,30 @@ pub fn run(config: &Config, options: &ImpactOptions) -> Result<bool> {
     let format = crate::output_format(config)?;
     let formatter = OutputFormatter::new(format);
 
-    let migrations = migration_files(options.migrations)?;
+    let explicit_migrations = migration_files(options.migrations)?;
     let mut dbt_projects = crate::dbt::DbtProjects::default();
     let dbt_catalogs = crate::dbt_catalog_files(config, templating, &mut dbt_projects)?;
     // Without schema files the migrations are the whole schema
     let schema_files = crate::schema_files(config, true)?;
-    let mut migrations = migrations;
-    if let Some(base) = options.base {
-        for file in changed_schema_files(base, &schema_files)? {
-            if !migrations.contains(&file) {
-                migrations.push(file);
+    let mut migrations = explicit_migrations.clone();
+    let versions = if let Some(base) = options.base {
+        let (changed, renames) = changed_schema_files(base, &schema_files)?;
+        for file in &changed {
+            if !migrations.contains(file) {
+                migrations.push(file.clone());
             }
         }
-    }
-    sqlsift_core::schema::sort_migration_files(&mut migrations);
-    let versions = if let Some(base) = options.base {
-        schema_versions_with_base(&schema_files, &migrations, base)?
+        schema_versions_with_base(
+            &schema_files,
+            &explicit_migrations,
+            &changed,
+            &renames,
+            base,
+        )?
     } else {
-        schema_versions(&schema_files, &migrations)
+        schema_versions(&schema_files, &explicit_migrations)
     };
+    sqlsift_core::schema::sort_migration_files(&mut migrations);
 
     let mut catalogs: Vec<Catalog> = Vec::with_capacity(2);
     for (sources, warn) in [(&versions.before, false), (&versions.after, true)] {
