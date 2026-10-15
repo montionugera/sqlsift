@@ -2443,7 +2443,8 @@ fn sqlite_strict_table_type_checking() {
         "non_strict_t should have strict=false"
     );
 
-    // Valid inserts: well-formed string conversions and matching types
+    // Valid inserts: well-formed string conversions and matching types,
+    // including whole-number REALs and column-to-column assignments
     assert_all_clean(
         &catalog,
         SqlDialect::SQLite,
@@ -2451,8 +2452,13 @@ fn sqlite_strict_table_type_checking() {
             "INSERT INTO strict_t (id, val, amount) VALUES (1, 'hello', 3.14)",
             "INSERT INTO strict_t (id, val, amount) VALUES ('123', 'hello', '12.3')",
             "INSERT INTO strict_t (amount) VALUES (42)",
+            "INSERT INTO strict_t (id) VALUES (1.0)",
+            "INSERT INTO strict_t (id) VALUES ('1.0')",
+            "INSERT INTO strict_t (id) VALUES ('1e3')",
             "UPDATE strict_t SET id = 2, amount = '45.6' WHERE id = 1",
             "UPDATE strict_t SET amount = 100 WHERE id = 1",
+            "UPDATE strict_t SET id = amount WHERE id = 1",
+            "UPDATE strict_t SET amount = id WHERE id = 1",
         ],
     );
 
@@ -2475,7 +2481,41 @@ fn sqlite_strict_table_type_checking() {
     ];
     assert_all_bad(&catalog, SqlDialect::SQLite, non_strict_bad);
 
-    // Strict table: type mismatches on assignments are reported as E0003 (TypeMismatch)
+    // Conversions that SQLite can perform (numbers/booleans into TEXT, column-to-column, TRUE into REAL)
+    // stay as ImplicitConversion (E0029) as on main
+    let conversion_cases = &[
+        bad(
+            "INSERT INTO strict_t (val) VALUES (123)",
+            ImplicitConversion,
+            "val",
+            None,
+            None,
+        ),
+        bad(
+            "UPDATE strict_t SET val = 123 WHERE id = 1",
+            ImplicitConversion,
+            "val",
+            None,
+            None,
+        ),
+        bad(
+            "UPDATE strict_t SET val = id WHERE id = 1",
+            ImplicitConversion,
+            "val",
+            None,
+            None,
+        ),
+        bad(
+            "INSERT INTO strict_t (amount) VALUES (TRUE)",
+            ImplicitConversion,
+            "amount",
+            None,
+            None,
+        ),
+    ];
+    assert_all_bad(&catalog, SqlDialect::SQLite, conversion_cases);
+
+    // Strict table: type mismatches on assignments for literals SQLite cannot convert are reported as E0003 (TypeMismatch)
     let strict_bad = &[
         bad(
             "INSERT INTO strict_t (id) VALUES ('abc')",
@@ -2492,6 +2532,13 @@ fn sqlite_strict_table_type_checking() {
             None,
         ),
         bad(
+            "INSERT INTO strict_t (id) VALUES ('1.5')",
+            TypeMismatch,
+            "id",
+            None,
+            None,
+        ),
+        bad(
             "INSERT INTO strict_t (amount) VALUES ('abc')",
             TypeMismatch,
             "amount",
@@ -2499,14 +2546,14 @@ fn sqlite_strict_table_type_checking() {
             None,
         ),
         bad(
-            "INSERT INTO strict_t (val) VALUES (123)",
+            "INSERT INTO strict_t (data) VALUES ('abc')",
             TypeMismatch,
-            "val",
+            "data",
             None,
             None,
         ),
         bad(
-            "INSERT INTO strict_t (data) VALUES ('abc')",
+            "INSERT INTO strict_t (data) VALUES (123)",
             TypeMismatch,
             "data",
             None,
@@ -2520,9 +2567,9 @@ fn sqlite_strict_table_type_checking() {
             None,
         ),
         bad(
-            "UPDATE strict_t SET val = 123 WHERE id = 1",
+            "UPDATE strict_t SET id = 1.5 WHERE id = 1",
             TypeMismatch,
-            "val",
+            "id",
             None,
             None,
         ),
