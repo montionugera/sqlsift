@@ -1387,33 +1387,26 @@ impl<'a> Resolver<'a> {
                     };
                     let in_right = right.is_empty() || right.iter().any(|(_, r)| has(r));
                     let in_left = left.iter().any(|(_, r)| has(r));
-                    let mut collation_mix_diag = None;
+                    let mut mix_args = None;
                     if self.dialect == SqlDialect::MySQL {
                         let left_col = left.iter().find_map(|(_, r)| {
                             match r.column(&col.value, self.dialect) {
-                                ColumnMatch::Yes(c) => c.collation.clone(),
+                                ColumnMatch::Yes(c) => {
+                                    Some((c.collation.clone(), c.character_set.clone()))
+                                }
                                 _ => None,
                             }
                         });
                         let right_col = right.iter().find_map(|(_, r)| {
                             match r.column(&col.value, self.dialect) {
-                                ColumnMatch::Yes(c) => c.collation.clone(),
+                                ColumnMatch::Yes(c) => {
+                                    Some((c.collation.clone(), c.character_set.clone()))
+                                }
                                 _ => None,
                             }
                         });
-                        if let (Some(c1), Some(c2)) = (left_col, right_col) {
-                            if !c1.eq_ignore_ascii_case(&c2) {
-                                collation_mix_diag = Some(
-                                    Diagnostic::error(
-                                        DiagnosticKind::IllegalMixOfCollations,
-                                        format!(
-                                            "Illegal mix of collations ({c1},IMPLICIT) and ({c2},IMPLICIT) for operation '='"
-                                        ),
-                                    )
-                                    .with_span(Span::from_sqlparser(&col.span))
-                                    .with_help("Collation mismatch between column references. Consider using an explicit COLLATE clause."),
-                                );
-                            }
+                        if let (Some((c1, cs1)), Some((c2, cs2))) = (left_col, right_col) {
+                            mix_args = Some((c1, cs1, c2, cs2));
                         }
                     }
                     let name = col.value.to_lowercase();
@@ -1423,8 +1416,15 @@ impl<'a> Resolver<'a> {
                             r.merged.insert(name);
                         }
                     }
-                    if let Some(diag) = collation_mix_diag {
-                        self.diagnostics.push(diag);
+                    if let Some((c1, cs1, c2, cs2)) = mix_args {
+                        self.check_collation_mix_raw(
+                            c1.as_deref(),
+                            cs1.as_deref(),
+                            c2.as_deref(),
+                            cs2.as_deref(),
+                            "=",
+                            Some(Span::from_sqlparser(&col.span)),
+                        );
                     }
                     if !(in_right && in_left) {
                         self.diagnostics.push(

@@ -150,3 +150,41 @@ fn test_non_mysql_is_clean() {
         "PostgreSQL should not report E0036"
     );
 }
+
+#[test]
+fn test_mysql_coercibility_silences() {
+    const MORE_SCHEMA: &str = "
+    CREATE TABLE t_latin (id INT, code VARCHAR(10) COLLATE latin1_general_ci);
+    CREATE TABLE t_latin_bin (id INT, code VARCHAR(10) COLLATE latin1_bin);
+    CREATE TABLE t_utf8 (id INT, code VARCHAR(10) COLLATE utf8_general_ci);
+    CREATE TABLE t_utf8mb3 (id INT, code VARCHAR(10) COLLATE utf8mb3_general_ci);
+    CREATE TABLE t_utf8mb4 (id INT, code VARCHAR(10) COLLATE utf8mb4_0900_ai_ci);
+    CREATE TABLE t_explicit_charset (id INT, code VARCHAR(10) CHARACTER SET utf8mb4);
+    ";
+    let mut builder = SchemaBuilder::with_dialect(SqlDialect::MySQL);
+    builder.parse(MORE_SCHEMA).expect("schema parses");
+    let catalog = builder.build().0;
+    let check_clean = |sql: &str| {
+        let diags = Analyzer::with_dialect(&catalog, SqlDialect::MySQL).analyze(sql);
+        let codes: Vec<_> = diags.iter().map(sqlsift_core::Diagnostic::code).collect();
+        assert!(
+            !codes.contains(&"E0036"),
+            "expected no E0036 for {sql}, got {codes:?}"
+        );
+    };
+
+    // utf8mb4 vs latin1 (Unicode side wins per coercibility rules)
+    check_clean("SELECT * FROM t_utf8mb4 u JOIN t_latin l ON u.code = l.code");
+
+    // utf8mb4 vs utf8mb3 (utf8mb4 superset converts)
+    check_clean("SELECT * FROM t_utf8mb4 u JOIN t_utf8mb3 m ON u.code = m.code");
+
+    // _bin vs _ci of same charset (uses _bin, no error)
+    check_clean("SELECT * FROM t_latin l JOIN t_latin_bin b ON l.code = b.code");
+
+    // utf8_general_ci vs utf8mb3_general_ci (same collation under two names)
+    check_clean("SELECT * FROM t_utf8 u JOIN t_utf8mb3 m ON u.code = m.code");
+
+    // Column with CHARACTER SET utf8mb4 and no COLLATE gets charset default (unknown collation)
+    check_clean("SELECT * FROM t_utf8mb4 u JOIN t_explicit_charset e ON u.code = e.code");
+}

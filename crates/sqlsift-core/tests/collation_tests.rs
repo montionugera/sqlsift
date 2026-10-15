@@ -1,4 +1,4 @@
-//! E0036 incompatible-collation: Incompatible collations in MySQL expressions.
+//! E0036 illegal-mix-of-collations: Incompatible collations in MySQL expressions.
 //!
 //! In MySQL, comparisons, LIKE, IN, JOIN ON/USING, CASE, COALESCE, and set operations
 //! combining two column references with different collations fail at runtime with
@@ -102,7 +102,7 @@ fn assert_mysql_clean(sql: &str) {
 #[test]
 fn test_join_on_different_collations() {
     assert_reports_e0036("SELECT * FROM t_general g JOIN t_unicode u ON g.name = u.name");
-    assert_reports_e0036("SELECT * FROM t_general g JOIN t_bin b ON g.name = b.name");
+    assert_mysql_clean("SELECT * FROM t_general g JOIN t_bin b ON g.name = b.name");
 }
 
 #[test]

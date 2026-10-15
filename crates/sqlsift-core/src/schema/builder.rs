@@ -1670,14 +1670,16 @@ fn build_column(
     }
 
     let is_text = col.data_type.is_string() || matches!(col.data_type, SqlType::Enum(_));
-    if is_text {
-        if col.character_set.is_none() {
+    if is_text && col.character_set.is_none() {
+        if let Some(col_coll) = &col.collation {
+            col.character_set = charset_from_collation(col_coll);
+        } else {
             col.character_set = default_charset.map(ToString::to_string);
-        }
-        if col.collation.is_none() {
-            if let Some(tbl_coll) = default_collation {
-                if collation_matches_charset(tbl_coll, col.character_set.as_deref()) {
-                    col.collation = Some(tbl_coll.to_string());
+            if col.collation.is_none() {
+                if let Some(tbl_coll) = default_collation {
+                    if collation_matches_charset(tbl_coll, col.character_set.as_deref()) {
+                        col.collation = Some(tbl_coll.to_string());
+                    }
                 }
             }
         }
@@ -1686,14 +1688,48 @@ fn build_column(
     (col, constraints)
 }
 
+pub(crate) fn normalize_charset(charset: &str) -> String {
+    let lower = charset.to_ascii_lowercase();
+    if lower == "utf8" {
+        "utf8mb3".to_string()
+    } else {
+        lower
+    }
+}
+
+pub(crate) fn normalize_collation(coll: &str) -> String {
+    let lower = coll.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("utf8_") {
+        format!("utf8mb3_{rest}")
+    } else {
+        lower
+    }
+}
+
+pub(crate) fn charset_from_collation(collation: &str) -> Option<String> {
+    let lower = collation.to_ascii_lowercase();
+    if lower == "binary" {
+        return Some("binary".to_string());
+    }
+    lower.split('_').next().map(|s| {
+        if s == "utf8" {
+            "utf8mb3".to_string()
+        } else {
+            s.to_string()
+        }
+    })
+}
+
 fn collation_matches_charset(collation: &str, charset: Option<&str>) -> bool {
     let Some(cs) = charset else {
         return true;
     };
-    collation.eq_ignore_ascii_case(cs)
-        || collation
+    let norm_cs = normalize_charset(cs);
+    let norm_coll = normalize_collation(collation);
+    norm_coll.eq_ignore_ascii_case(&norm_cs)
+        || norm_coll
             .to_ascii_lowercase()
-            .starts_with(&format!("{}_", cs.to_ascii_lowercase()))
+            .starts_with(&format!("{}_", norm_cs.to_ascii_lowercase()))
 }
 
 /// Extract character set and collation from CREATE TABLE options.

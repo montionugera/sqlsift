@@ -221,7 +221,7 @@ The action is also listed on the [GitHub Marketplace](https://github.com/marketp
 | [E0033](https://sqlsift.dev/docs/rules/E0033.html) | timestamp-timezone-mismatch | Comparing or assigning timestamp with timestamptz depends on session TimeZone |
 | [E0034](https://sqlsift.dev/docs/rules/E0034.html) | case-enum-missing-labels | CASE over an enum column misses some labels and has no ELSE |
 | [E0035](https://sqlsift.dev/docs/rules/E0035.html) | duplicate-insert-value | Duplicate primary key or unique values in an INSERT VALUES list |
-| [E0036](https://sqlsift.dev/docs/rules/E0036.html) | incompatible-collation | Comparison or expression combines incompatible collations in MySQL |
+| [E0036](https://sqlsift.dev/docs/rules/E0036.html) | illegal-mix-of-collations | Comparison or expression combines incompatible collations in MySQL |
 
 E0001-E0017, E0027, E0035, and E0036 report queries the database rejects and are errors by default; E0018-E0023, E0029-E0031, and E0033 (`suspicious`) report valid queries that almost certainly don't do what was meant and are warnings by default; E0024-E0026 and E0028 (`restriction`) and E0032, E0034 (`pedantic`) are off until enabled (`-W restriction`, `-W pedantic`).
 
