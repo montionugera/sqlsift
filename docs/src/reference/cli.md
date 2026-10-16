@@ -304,6 +304,13 @@ Without schema arguments, the schema settings from `sqlsift.toml` are used. See 
 
 ## `sqlsift rules`
 
+```
+sqlsift rules [OPTIONS]
+
+Options:
+  -f, --format <FORMAT>     Output format: human, json [default: human]
+```
+
 Prints every rule with its code, name, category, default level and description. See [Rules and levels](../guide/rules.md).
 
 ## `sqlsift parse`

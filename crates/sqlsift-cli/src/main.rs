@@ -266,23 +266,45 @@ fn entries_word(n: usize) -> &'static str {
     }
 }
 
-/// Print the rule registry as a table
-fn print_rules() {
+/// Print the rule registry as a table or JSON
+fn print_rules(format: crate::args::RulesFormat) {
     use sqlsift_core::rules::RULES;
-    let name_width = RULES.iter().map(|r| r.name.len()).max().unwrap_or(0);
-    println!(
-        "{:<6} {:<name_width$} {:<12} {:<8} DESCRIPTION",
-        "CODE", "NAME", "CATEGORY", "DEFAULT"
-    );
-    for rule in RULES {
-        println!(
-            "{:<6} {:<name_width$} {:<12} {:<8} {}",
-            rule.code,
-            rule.name,
-            rule.category.name(),
-            rule.default_level().name(),
-            rule.summary
-        );
+    match format {
+        crate::args::RulesFormat::Human => {
+            let name_width = RULES.iter().map(|r| r.name.len()).max().unwrap_or(0);
+            println!(
+                "{:<6} {:<name_width$} {:<12} {:<8} DESCRIPTION",
+                "CODE", "NAME", "CATEGORY", "DEFAULT"
+            );
+            for rule in RULES {
+                println!(
+                    "{:<6} {:<name_width$} {:<12} {:<8} {}",
+                    rule.code,
+                    rule.name,
+                    rule.category.name(),
+                    rule.default_level().name(),
+                    rule.summary
+                );
+            }
+        }
+        crate::args::RulesFormat::Json => {
+            let rules_json: Vec<_> = RULES
+                .iter()
+                .map(|rule| {
+                    serde_json::json!({
+                        "code": rule.code,
+                        "name": rule.name,
+                        "category": rule.category.name(),
+                        "default_level": rule.default_level().name(),
+                        "summary": rule.summary,
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rules_json).expect("serialize rules JSON")
+            );
+        }
     }
 }
 
@@ -1342,8 +1364,8 @@ fn run(args: Args) -> Result<bool> {
             Ok(false)
         }
 
-        Command::Rules => {
-            print_rules();
+        Command::Rules { format } => {
+            print_rules(format);
             Ok(false)
         }
 
