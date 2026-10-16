@@ -1,4 +1,4 @@
-import { ExtensionContext, workspace } from "vscode";
+import { commands, ExtensionContext, workspace } from "vscode";
 import {
   DocumentFilter,
   LanguageClient,
@@ -86,6 +86,19 @@ export function activate(context: ExtensionContext) {
   );
 
   client.start();
+
+  context.subscriptions.push(
+    commands.registerCommand("sqlsift.restartServer", async () => {
+      if (client) {
+        await client.restart();
+      }
+    }),
+    commands.registerCommand("sqlsift.showOutput", () => {
+      if (client) {
+        client.outputChannel.show();
+      }
+    })
+  );
 }
 
 export function deactivate(): Thenable<void> | undefined {

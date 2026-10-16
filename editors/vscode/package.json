@@ -55,6 +55,16 @@
         }
       }
     },
+    "commands": [
+      {
+        "command": "sqlsift.restartServer",
+        "title": "sqlsift: Restart Language Server"
+      },
+      {
+        "command": "sqlsift.showOutput",
+        "title": "sqlsift: Show Output"
+      }
+    ],
     "languages": [
       {
         "id": "sql",
