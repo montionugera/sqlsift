@@ -2133,6 +2133,49 @@ fn e1000_parse_error_in_one_statement_does_not_hide_other_diagnostics() {
 }
 
 #[test]
+fn e1000_deeply_nested_subqueries_parse_cleanly() {
+    let c = diag_catalog();
+    // 40 levels of nested subqueries (would fail under sqlparser default 50 recursion limit)
+    let mut query = "SELECT id FROM users".to_string();
+    for _ in 0..40 {
+        query = format!("SELECT id FROM users WHERE id IN ({query})");
+    }
+    let diags = analyze(&c, &query);
+    assert!(
+        diags.is_empty(),
+        "expected 40 levels of nesting to analyze cleanly, got: {diags:?}"
+    );
+}
+
+#[test]
+fn e1000_recursion_limit_reports_nesting_limit_error() {
+    let c = diag_catalog();
+    // Beyond the recursion limit (260 levels > 250 limit)
+    let mut query = "SELECT id FROM users".to_string();
+    for _ in 0..260 {
+        query = format!("SELECT id FROM users WHERE id IN ({query})");
+    }
+    let diags = analyze(&c, &query);
+    assert_eq!(codes(&diags), vec!["E1000"], "{diags:?}");
+    assert!(
+        diags[0]
+            .message
+            .contains("query exceeds sqlsift nesting limit"),
+        "unexpected message: {}",
+        diags[0].message
+    );
+    assert!(
+        diags[0]
+            .help
+            .as_deref()
+            .unwrap_or("")
+            .contains("levels of nesting"),
+        "unexpected help: {:?}",
+        diags[0].help
+    );
+}
+
+#[test]
 fn e1000_misspelled_keyword_on_later_line() {
     let c = diag_catalog();
     let d = single(&c, "SELECT id FROM users;\n\nSELEC id FROM users;");

@@ -7,7 +7,7 @@ use sqlparser::ast::{
     TableConstraint, TriggerEvent, TriggerPeriod, Use, UserDefinedTypeRepresentation, Value,
     ValueWithSpan,
 };
-use sqlparser::parser::{Parser, ParserError};
+use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
 
 use crate::analyzer;
@@ -228,7 +228,7 @@ impl SchemaBuilder {
         let search_path = self.catalog.search_path.clone();
 
         // Try parsing the entire SQL first (fast path)
-        match Parser::parse_sql(dialect.as_ref(), sql) {
+        match crate::stack::parse_sql(dialect.as_ref(), sql) {
             Ok(statements) => {
                 for stmt in statements {
                     self.process_statement(&stmt);
@@ -257,13 +257,15 @@ impl SchemaBuilder {
             }
 
             // Parse the untrimmed text so parser locations are relative to `raw_stmt`
-            let parsed = Parser::parse_sql(dialect.as_ref(), raw_stmt).or_else(|err| {
+            let parsed = crate::stack::parse_sql(dialect.as_ref(), raw_stmt).or_else(|err| {
                 // BigQuery: retry with nested type parameter lists closed by `> >`
                 // (sqlparser rejects some `>>`); only locations past them shift
                 match self.dialect {
                     SqlDialect::BigQuery => {
                         crate::analyzer::bigquery::split_closing_angle_brackets(raw_stmt)
-                            .and_then(|split| Parser::parse_sql(dialect.as_ref(), &split).ok())
+                            .and_then(|split| {
+                                crate::stack::parse_sql(dialect.as_ref(), &split).ok()
+                            })
                             .ok_or(err)
                     }
                     _ => Err(err),
@@ -566,7 +568,7 @@ impl SchemaBuilder {
             return false;
         };
         let dialect = self.dialect.parser_dialect();
-        let Ok(stmts) = Parser::parse_sql(dialect.as_ref(), &masked) else {
+        let Ok(stmts) = crate::stack::parse_sql(dialect.as_ref(), &masked) else {
             return false;
         };
         for stmt in stmts {

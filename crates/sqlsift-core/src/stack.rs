@@ -8,10 +8,27 @@
 //! analysis with [`with_analysis_stack`] or spawn their worker threads with
 //! [`ANALYSIS_STACK_SIZE`].
 
+use sqlparser::ast::Statement;
+use sqlparser::dialect::Dialect;
+use sqlparser::parser::{Parser, ParserError};
+
 /// Stack size for threads that parse and analyze SQL. Only the pages a thread
 /// touches are committed, so this costs nothing for ordinary queries; it lets
 /// expressions of hundreds of thousands of terms be analyzed.
 pub const ANALYSIS_STACK_SIZE: usize = 256 * 1024 * 1024;
+
+/// Maximum parser recursion depth. sqlparser defaults to 50, which trips on deeply
+/// nested subqueries that real databases accept. Sized to allow deep subquery nesting
+/// without risking a stack overflow during AST traversal.
+pub const PARSE_RECURSION_LIMIT: usize = 250;
+
+/// Parse SQL statements using sqlsift's recursion limit
+pub fn parse_sql(dialect: &dyn Dialect, sql: &str) -> Result<Vec<Statement>, ParserError> {
+    Parser::new(dialect)
+        .with_recursion_limit(PARSE_RECURSION_LIMIT)
+        .try_with_sql(sql)?
+        .parse_statements()
+}
 
 /// Run `f` on a thread with an [`ANALYSIS_STACK_SIZE`] stack and return its result
 /// (a panic in `f` is propagated). If the thread can't be spawned (or on

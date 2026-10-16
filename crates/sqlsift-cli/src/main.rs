@@ -1513,15 +1513,12 @@ fn run(args: Args) -> Result<bool> {
             }
             Ok(errors > 0)
         }
-
         Command::Parse { file } => {
-            use sqlparser::parser::Parser;
-
             // Parse and display AST (for debugging)
             let content = read_file(&file)?;
 
             let dialect = SqlDialect::default().parser_dialect();
-            match Parser::parse_sql(dialect.as_ref(), &content) {
+            match sqlsift_core::stack::parse_sql(dialect.as_ref(), &content) {
                 Ok(statements) => {
                     for (i, stmt) in statements.iter().enumerate() {
                         println!("Statement {}:", i + 1);

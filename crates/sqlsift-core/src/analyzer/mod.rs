@@ -22,7 +22,7 @@ use std::ops::Range;
 
 use sqlparser::ast::{Spanned, Statement};
 use sqlparser::dialect::Dialect;
-use sqlparser::parser::{Parser, ParserError};
+use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::dialect::SqlDialect;
@@ -831,7 +831,7 @@ impl<'a> Analyzer<'a> {
     /// parse, the table or view it defines is returned with its position.
     fn parse_statements(&mut self, sql: &str, lines: &LineIndex) -> ParsedStatements {
         let dialect = self.dialect.parser_dialect();
-        let error = match Parser::parse_sql(dialect.as_ref(), sql) {
+        let error = match crate::stack::parse_sql(dialect.as_ref(), sql) {
             Ok(statements) => {
                 let statements = statements.into_iter().map(|s| (s, Origin::START)).collect();
                 return (statements, Vec::new());
@@ -859,7 +859,7 @@ impl<'a> Analyzer<'a> {
             let (line, column) = lines.line_column(range.start);
             let origin = Origin { line, column };
             let text = &sql[range.clone()];
-            let error = match Parser::parse_sql(dialect.as_ref(), text) {
+            let error = match crate::stack::parse_sql(dialect.as_ref(), text) {
                 Ok(parsed) => {
                     statements.extend(parsed.into_iter().map(|s| (s, origin)));
                     continue;
@@ -867,17 +867,19 @@ impl<'a> Analyzer<'a> {
                 Err(error) => error,
             };
             let retried = mask_unsupported_clauses(self.dialect, text, false)
-                .and_then(|(masked, _)| Parser::parse_sql(dialect.as_ref(), &masked).ok())
+                .and_then(|(masked, _)| crate::stack::parse_sql(dialect.as_ref(), &masked).ok())
                 .or_else(|| match self.dialect {
                     // `t.$1` positional columns
                     SqlDialect::Snowflake => {
-                        snowflake::mask_positional_columns(dialect.as_ref(), text)
-                            .and_then(|masked| Parser::parse_sql(dialect.as_ref(), &masked).ok())
+                        snowflake::mask_positional_columns(dialect.as_ref(), text).and_then(
+                            |masked| crate::stack::parse_sql(dialect.as_ref(), &masked).ok(),
+                        )
                     }
                     // `FOR NO KEY UPDATE` / `FOR KEY SHARE`
                     dialect_kind if dialect_kind.is_psql() => {
-                        mask_row_lock_strength(dialect.as_ref(), text)
-                            .and_then(|masked| Parser::parse_sql(dialect.as_ref(), &masked).ok())
+                        mask_row_lock_strength(dialect.as_ref(), text).and_then(|masked| {
+                            crate::stack::parse_sql(dialect.as_ref(), &masked).ok()
+                        })
                     }
                     _ => None,
                 });
@@ -1161,9 +1163,14 @@ fn parse_error_diagnostic(
     range: Range<usize>,
     lines: &LineIndex,
 ) -> Diagnostic {
-    let message = match error {
-        ParserError::TokenizerError(m) | ParserError::ParserError(m) => m.clone(),
-        ParserError::RecursionLimitExceeded => "recursion limit exceeded".to_string(),
+    let (message, help) = match error {
+        ParserError::TokenizerError(m) | ParserError::ParserError(m) => (m.clone(), None),
+        ParserError::RecursionLimitExceeded => (
+            "query exceeds sqlsift nesting limit".to_string(),
+            Some(
+                "This query has too many levels of nesting. Simplify or flatten the nested subqueries.",
+            ),
+        ),
     };
     // sqlparser appends " at Line: L, Column: C" to the message
     let (message, location) = match message.rsplit_once(" at Line: ") {
@@ -1192,11 +1199,15 @@ fn parse_error_diagnostic(
         let (line, column) = lines.line_column(end);
         Span::with_location(line, column, 1)
     };
-    Diagnostic::error(
+    let mut diag = Diagnostic::error(
         DiagnosticKind::ParseError,
         format!("Parse error: {message}"),
     )
-    .with_span(span)
+    .with_span(span);
+    if let Some(help) = help {
+        diag = diag.with_help(help);
+    }
+    diag
 }
 /// Output columns (name and type) of a query, as far as they can be inferred, or
 /// `None` if they can't be determined (e.g. `SELECT *` over an unknown table).
