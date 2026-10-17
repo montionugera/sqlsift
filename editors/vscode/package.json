@@ -58,11 +58,13 @@
     "commands": [
       {
         "command": "sqlsift.restartServer",
-        "title": "sqlsift: Restart Language Server"
+        "title": "Restart Language Server",
+        "category": "sqlsift"
       },
       {
         "command": "sqlsift.showOutput",
-        "title": "sqlsift: Show Output"
+        "title": "Show Output",
+        "category": "sqlsift"
       }
     ],
     "languages": [

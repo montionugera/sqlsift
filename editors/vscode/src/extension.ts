@@ -1,4 +1,4 @@
-import { commands, ExtensionContext, workspace } from "vscode";
+import { commands, ExtensionContext, OutputChannel, window, workspace } from "vscode";
 import {
   DocumentFilter,
   LanguageClient,
@@ -9,6 +9,7 @@ import * as path from "path";
 import * as fs from "fs";
 
 let client: LanguageClient | undefined;
+let outputChannel: OutputChannel | undefined;
 
 function getBundledServerPath(context: ExtensionContext): string | undefined {
   const binaryName =
@@ -54,7 +55,7 @@ function documentSelector(embeddedSql: boolean): DocumentFilter[] {
   return selector;
 }
 
-export function activate(context: ExtensionContext) {
+function createClient(context: ExtensionContext): LanguageClient {
   const config = workspace.getConfiguration("sqlsift");
   const configuredPath = config.get<string>("serverPath", "sqlsift-lsp");
 
@@ -76,27 +77,47 @@ export function activate(context: ExtensionContext) {
     documentSelector: documentSelector(
       config.get<boolean>("embeddedSql.enable", true)
     ),
+    outputChannel,
   };
 
-  client = new LanguageClient(
+  return new LanguageClient(
     "sqlsift",
     "sqlsift",
     serverOptions,
     clientOptions
   );
+}
 
-  client.start();
+async function startServer(context: ExtensionContext): Promise<void> {
+  if (client) {
+    try {
+      await client.stop();
+    } catch {
+      // Ignore stop errors if previous server was not running or crashed
+    }
+    client = undefined;
+  }
+
+  client = createClient(context);
+  try {
+    await client.start();
+  } catch (err) {
+    window.showErrorMessage(`Failed to start sqlsift language server: ${err}`);
+  }
+}
+
+export async function activate(context: ExtensionContext) {
+  outputChannel = window.createOutputChannel("sqlsift");
+  context.subscriptions.push(outputChannel);
+
+  await startServer(context);
 
   context.subscriptions.push(
     commands.registerCommand("sqlsift.restartServer", async () => {
-      if (client) {
-        await client.restart();
-      }
+      await startServer(context);
     }),
     commands.registerCommand("sqlsift.showOutput", () => {
-      if (client) {
-        client.outputChannel.show();
-      }
+      outputChannel?.show();
     })
   );
 }
