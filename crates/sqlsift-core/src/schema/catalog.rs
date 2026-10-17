@@ -722,6 +722,7 @@ impl std::fmt::Display for QualifiedName {
 
 /// Table definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct TableDef {
     pub name: QualifiedName,
     pub columns: IndexMap<String, ColumnDef>,
@@ -745,6 +746,9 @@ pub struct TableDef {
     /// UPDATE may set NOT NULL columns to NULL
     #[serde(default)]
     pub before_update_trigger: bool,
+    /// Whether this table was created with STRICT typing (SQLite STRICT tables)
+    #[serde(default)]
+    pub strict: bool,
 }
 
 /// A column that ALTER TABLE renamed or dropped
@@ -773,6 +777,7 @@ impl TableDef {
             unknown_unique_keys: false,
             before_insert_trigger: false,
             before_update_trigger: false,
+            strict: false,
         }
     }
 
@@ -891,6 +896,9 @@ pub struct ColumnDef {
     /// (see [`Catalog::is_case_sensitive_column`])
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub case_sensitive: bool,
+    /// Whether the column has an explicit `COLLATE` clause
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collated: bool,
 }
 
 impl ColumnDef {
@@ -905,6 +913,7 @@ impl ColumnDef {
             auto_increment: false,
             generated: false,
             case_sensitive: false,
+            collated: false,
         }
     }
 
@@ -976,6 +985,13 @@ pub struct CheckConstraintDef {
     pub expression: String,
     #[serde(default = "default_true")]
     pub enforced: bool,
+    /// Column this CHECK constraint was declared inline on (`None` for table-level)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    /// Database-generated constraint name when `name` is `None` (e.g., `t_x_check`,
+    /// `t_check`, `t_chk_1`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_name: Option<String>,
 }
 
 /// Enum type definition (CREATE TYPE ... AS ENUM)

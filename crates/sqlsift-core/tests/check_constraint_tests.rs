@@ -295,3 +295,185 @@ fn diagnostic_message_and_help() {
         diags[0].help
     );
 }
+
+#[test]
+fn skips_columns_with_explicit_collation() {
+    let pg_schema = r#"
+    CREATE TABLE t (
+        c TEXT COLLATE "und-x-icu" CHECK (c IN ('a', 'b'))
+    );
+    "#;
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            pg_schema,
+            "INSERT INTO t (c) VALUES ('A')"
+        ),
+        Vec::<&str>::new()
+    );
+
+    let sqlite_schema = "
+    CREATE TABLE t (
+        c1 TEXT COLLATE NOCASE CHECK (c1 IN ('a', 'b')),
+        c2 TEXT COLLATE RTRIM CHECK (c2 = 'ab')
+    );
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::SQLite,
+            sqlite_schema,
+            "INSERT INTO t (c1, c2) VALUES ('A', 'ab   ')"
+        ),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
+fn unnamed_check_dropped_by_generated_name() {
+    // PostgreSQL column-level unnamed CHECK: t_x_check
+    let pg_col_schema = "
+    CREATE TABLE t (x INT CHECK (x > 0));
+    ALTER TABLE t DROP CONSTRAINT t_x_check;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            pg_col_schema,
+            "INSERT INTO t (x) VALUES (-1)"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // PostgreSQL table-level unnamed CHECK: t_check
+    let pg_tbl_schema = "
+    CREATE TABLE t (x INT, y INT, CHECK (x < y));
+    ALTER TABLE t DROP CONSTRAINT t_check;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            pg_tbl_schema,
+            "INSERT INTO t (x, y) VALUES (10, 5)"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // PostgreSQL single-column table-level unnamed CHECK dropped as t_check
+    let pg_single_tbl_schema = "
+    CREATE TABLE t (x INT, CHECK (x > 0));
+    ALTER TABLE t DROP CONSTRAINT t_check;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            pg_single_tbl_schema,
+            "INSERT INTO t (x) VALUES (-1)"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // MySQL unnamed CHECK: t_chk_1
+    let mysql_schema = "
+    CREATE TABLE t (x INT CHECK (x > 0));
+    ALTER TABLE t DROP CHECK t_chk_1;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::MySQL,
+            mysql_schema,
+            "INSERT INTO t (x) VALUES (-1)"
+        ),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
+fn other_ways_check_constraint_removed_or_disabled() {
+    // MySQL DROP CHECK k
+    let mysql_drop = "
+    CREATE TABLE t (x INT CONSTRAINT k CHECK (x > 0));
+    ALTER TABLE t DROP CHECK k;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::MySQL,
+            mysql_drop,
+            "INSERT INTO t (x) VALUES (-1)"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // MySQL ALTER CHECK k NOT ENFORCED
+    let mysql_not_enforced = "
+    CREATE TABLE t (x INT CONSTRAINT k CHECK (x > 0));
+    ALTER TABLE t ALTER CHECK k NOT ENFORCED;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::MySQL,
+            mysql_not_enforced,
+            "INSERT INTO t (x) VALUES (-1)"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // PostgreSQL RENAME CONSTRAINT followed by DROP CONSTRAINT
+    let pg_rename_drop = "
+    CREATE TABLE t (x INT CHECK (x > 0));
+    ALTER TABLE t RENAME CONSTRAINT t_x_check TO positive_x;
+    ALTER TABLE t DROP CONSTRAINT positive_x;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            pg_rename_drop,
+            "INSERT INTO t (x) VALUES (-1)"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // Dropping and re-adding the column drops the CHECK constraint with it
+    let pg_drop_readd_col = "
+    CREATE TABLE t (id INT, x INT CHECK (x > 0));
+    ALTER TABLE t DROP COLUMN x;
+    ALTER TABLE t ADD COLUMN x INT;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            pg_drop_readd_col,
+            "INSERT INTO t (id, x) VALUES (1, -1)"
+        ),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
+fn postgres_varchar_trailing_spaces_truncated_before_check() {
+    let schema = "
+    CREATE TABLE t (
+        c VARCHAR(2) CHECK (c = 'ab')
+    );
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            schema,
+            "INSERT INTO t (c) VALUES ('ab   ')"
+        ),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
+fn sqlite_skips_non_integer_arithmetic_in_check() {
+    let schema = "
+    CREATE TABLE t (
+        x INT CHECK (x * 0.1 <> 0.3)
+    );
+    ";
+    assert_eq!(
+        codes_with_schema(SqlDialect::SQLite, schema, "INSERT INTO t (x) VALUES (3)"),
+        Vec::<&str>::new()
+    );
+}

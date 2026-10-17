@@ -62,9 +62,14 @@ fn query_name(line: &str) -> Option<&str> {
     sqlc_query_name(line).or_else(|| crate::named_queries::header(line).map(|h| h.name))
 }
 
-/// The query name of a `-- name: <Name> :<command>` line
+/// The query name of a `-- name: <Name> :<command>` or `/* name: <Name> :<command> */` line
 fn sqlc_query_name(line: &str) -> Option<&str> {
-    let rest = line.trim_start().strip_prefix("--")?.trim_start();
+    let trimmed = line.trim();
+    let rest = if let Some(rest) = trimmed.strip_prefix("--") {
+        rest.trim_start()
+    } else {
+        trimmed.strip_prefix("/*")?.strip_suffix("*/")?.trim()
+    };
     let rest = rest.strip_prefix("name:")?;
     let mut words = rest.split_whitespace();
     let name = words.next()?;
@@ -336,16 +341,22 @@ mod tests {
         assert_eq!(query_name("-- name: the user's name"), None);
         assert_eq!(query_name("-- name GetPost :one"), None);
         assert_eq!(query_name("SELECT 1 -- name: GetPost :one"), None);
+        assert_eq!(query_name("/* name: Other :many */"), Some("Other"));
+        assert_eq!(query_name("  /*name: Other :many*/  "), Some("Other"));
+        assert_eq!(query_name("/* name: Other */"), None);
+        assert_eq!(query_name("SELECT 1 /* name: Other :many */"), None);
     }
 
     #[test]
     fn finds_the_query_of_a_line() {
         let names = QueryNames::parse(
-            "SELECT 1;\n-- name: A :one\nSELECT 2;\n\n-- name: B :many\nSELECT 3;",
+            "SELECT 1;\n-- name: A :one\nSELECT 2;\n\n-- name: B :many\nSELECT 3;\n\n/* name: C :one */\nSELECT 4;",
         );
         assert_eq!(names.at(1), None);
         assert_eq!(names.at(2), Some("A"));
         assert_eq!(names.at(4), Some("A"));
         assert_eq!(names.at(6), Some("B"));
+        assert_eq!(names.at(8), Some("C"));
+        assert_eq!(names.at(9), Some("C"));
     }
 }

@@ -1829,10 +1829,10 @@ fn e0002_multiple_columns_reported_in_source_order() {
     assert_eq!(
         names,
         vec![
-            "Column 'zz' not found",
-            "Column 'yy' not found",
-            "Column 'qq' not found",
-            "Column 'ww' not found"
+            "Column 'zz' not found in users, orders",
+            "Column 'yy' not found in users, orders",
+            "Column 'qq' not found in users, orders",
+            "Column 'ww' not found in users, orders"
         ]
     );
     let cols: Vec<usize> = diags.iter().map(|d| loc(d).1).collect();
@@ -2130,6 +2130,49 @@ fn e1000_parse_error_in_one_statement_does_not_hide_other_diagnostics() {
     assert_eq!(codes(&diags), vec!["E0002", "E1000", "E0001"], "{diags:?}");
     let span = diags[1].span.unwrap();
     assert_eq!((span.line, span.column), (2, 10));
+}
+
+#[test]
+fn e1000_deeply_nested_subqueries_parse_cleanly() {
+    let c = diag_catalog();
+    // 40 levels of nested subqueries (would fail under sqlparser default 50 recursion limit)
+    let mut query = "SELECT id FROM users".to_string();
+    for _ in 0..40 {
+        query = format!("SELECT id FROM users WHERE id IN ({query})");
+    }
+    let diags = analyze(&c, &query);
+    assert!(
+        diags.is_empty(),
+        "expected 40 levels of nesting to analyze cleanly, got: {diags:?}"
+    );
+}
+
+#[test]
+fn e1000_recursion_limit_reports_nesting_limit_error() {
+    let c = diag_catalog();
+    // Beyond the recursion limit (260 levels > 250 limit)
+    let mut query = "SELECT id FROM users".to_string();
+    for _ in 0..260 {
+        query = format!("SELECT id FROM users WHERE id IN ({query})");
+    }
+    let diags = analyze(&c, &query);
+    assert_eq!(codes(&diags), vec!["E1000"], "{diags:?}");
+    assert!(
+        diags[0]
+            .message
+            .contains("query exceeds sqlsift nesting limit"),
+        "unexpected message: {}",
+        diags[0].message
+    );
+    assert!(
+        diags[0]
+            .help
+            .as_deref()
+            .unwrap_or("")
+            .contains("levels of nesting"),
+        "unexpected help: {:?}",
+        diags[0].help
+    );
 }
 
 #[test]

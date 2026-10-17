@@ -144,12 +144,12 @@ impl Resolver<'_> {
                 continue;
             }
 
-            // Only evaluate plain integer, numeric, and text columns
+            // Only evaluate plain integer, numeric, and text columns without an explicit collation
             for col_name in &referenced_cols {
-                let Some(col_def) = table_def.columns.get(col_name) else {
+                let Some(col_def) = table_def.get_column(col_name) else {
                     continue 'check_loop;
                 };
-                if !is_plain_integer_numeric_or_text(&col_def.data_type) {
+                if col_def.collated || !is_plain_integer_numeric_or_text(&col_def.data_type) {
                     continue 'check_loop;
                 }
             }
@@ -165,7 +165,9 @@ impl Resolver<'_> {
             let mut env = HashMap::new();
             for col_name in &referenced_cols {
                 let (val_expr, _) = assigned_columns[col_name];
-                let col_def = &table_def.columns[col_name];
+                let Some(col_def) = table_def.get_column(col_name) else {
+                    continue 'check_loop;
+                };
                 let const_val =
                     convert_literal_to_column_type(val_expr, &col_def.data_type, self.dialect);
                 env.insert(col_name.clone(), const_val);
@@ -324,7 +326,7 @@ fn integer_range(dialect: SqlDialect, column_type: &SqlType) -> Option<(i128, i1
     Some((min, max))
 }
 
-fn collect_referenced_columns(expr: &Expr, columns: &mut HashSet<String>) {
+pub(crate) fn collect_referenced_columns(expr: &Expr, columns: &mut HashSet<String>) {
     match expr {
         Expr::Identifier(ident) => {
             columns.insert(ident.value.to_ascii_lowercase());
@@ -446,7 +448,25 @@ fn convert_literal_to_column_type(
                 Expr::Value(ValueWithSpan {
                     value: Value::SingleQuotedString(s),
                     ..
-                }) => EvalValue::String(s.clone()),
+                }) => {
+                    if dialect.is_psql() {
+                        if let SqlType::Varchar {
+                            length: Some(limit),
+                        } = col_type
+                        {
+                            let Ok(limit) = usize::try_from(*limit) else {
+                                return EvalValue::Unknown;
+                            };
+                            if s.chars().count() > limit {
+                                if s.chars().skip(limit).all(|c| c == ' ') {
+                                    return EvalValue::String(s.chars().take(limit).collect());
+                                }
+                                return EvalValue::Unknown;
+                            }
+                        }
+                    }
+                    EvalValue::String(s.clone())
+                }
                 _ => EvalValue::Unknown,
             }
         }
@@ -555,7 +575,7 @@ fn eval_expr(expr: &Expr, env: &HashMap<String, EvalValue>, dialect: SqlDialect)
             BinaryOperator::Plus | BinaryOperator::Minus | BinaryOperator::Multiply => {
                 let l = eval_expr(left, env, dialect);
                 let r = eval_expr(right, env, dialect);
-                eval_arithmetic(op, &l, &r)
+                eval_arithmetic(op, &l, &r, dialect)
             }
             _ => EvalValue::Unknown,
         },
@@ -811,7 +831,12 @@ fn eval_comparison(
     }
 }
 
-fn eval_arithmetic(op: &BinaryOperator, left: &EvalValue, right: &EvalValue) -> EvalValue {
+fn eval_arithmetic(
+    op: &BinaryOperator,
+    left: &EvalValue,
+    right: &EvalValue,
+    dialect: SqlDialect,
+) -> EvalValue {
     if *left == EvalValue::Null || *right == EvalValue::Null {
         return EvalValue::Null;
     }
@@ -833,42 +858,47 @@ fn eval_arithmetic(op: &BinaryOperator, left: &EvalValue, right: &EvalValue) -> 
                 mantissa: m2,
                 scale: s2,
             },
-        ) => match op {
-            BinaryOperator::Plus => {
-                let Some((a, b)) = align_decimals(*m1, *s1, *m2, *s2) else {
-                    return EvalValue::Unknown;
-                };
-                let Some(mantissa) = a.checked_add(b) else {
-                    return EvalValue::Unknown;
-                };
-                EvalValue::Decimal {
-                    mantissa,
-                    scale: (*s1).max(*s2),
+        ) => {
+            if dialect == SqlDialect::SQLite {
+                return EvalValue::Unknown;
+            }
+            match op {
+                BinaryOperator::Plus => {
+                    let Some((a, b)) = align_decimals(*m1, *s1, *m2, *s2) else {
+                        return EvalValue::Unknown;
+                    };
+                    let Some(mantissa) = a.checked_add(b) else {
+                        return EvalValue::Unknown;
+                    };
+                    EvalValue::Decimal {
+                        mantissa,
+                        scale: (*s1).max(*s2),
+                    }
                 }
-            }
-            BinaryOperator::Minus => {
-                let Some((a, b)) = align_decimals(*m1, *s1, *m2, *s2) else {
-                    return EvalValue::Unknown;
-                };
-                let Some(mantissa) = a.checked_sub(b) else {
-                    return EvalValue::Unknown;
-                };
-                EvalValue::Decimal {
-                    mantissa,
-                    scale: (*s1).max(*s2),
+                BinaryOperator::Minus => {
+                    let Some((a, b)) = align_decimals(*m1, *s1, *m2, *s2) else {
+                        return EvalValue::Unknown;
+                    };
+                    let Some(mantissa) = a.checked_sub(b) else {
+                        return EvalValue::Unknown;
+                    };
+                    EvalValue::Decimal {
+                        mantissa,
+                        scale: (*s1).max(*s2),
+                    }
                 }
+                BinaryOperator::Multiply => {
+                    let Some(mantissa) = m1.checked_mul(*m2) else {
+                        return EvalValue::Unknown;
+                    };
+                    let Some(scale) = s1.checked_add(*s2) else {
+                        return EvalValue::Unknown;
+                    };
+                    EvalValue::Decimal { mantissa, scale }
+                }
+                _ => EvalValue::Unknown,
             }
-            BinaryOperator::Multiply => {
-                let Some(mantissa) = m1.checked_mul(*m2) else {
-                    return EvalValue::Unknown;
-                };
-                let Some(scale) = s1.checked_add(*s2) else {
-                    return EvalValue::Unknown;
-                };
-                EvalValue::Decimal { mantissa, scale }
-            }
-            _ => EvalValue::Unknown,
-        },
+        }
         (EvalValue::Int(a), EvalValue::Decimal { .. }) => eval_arithmetic(
             op,
             &EvalValue::Decimal {
@@ -876,6 +906,7 @@ fn eval_arithmetic(op: &BinaryOperator, left: &EvalValue, right: &EvalValue) -> 
                 scale: 0,
             },
             right,
+            dialect,
         ),
         (EvalValue::Decimal { .. }, EvalValue::Int(b)) => eval_arithmetic(
             op,
@@ -884,6 +915,7 @@ fn eval_arithmetic(op: &BinaryOperator, left: &EvalValue, right: &EvalValue) -> 
                 mantissa: *b,
                 scale: 0,
             },
+            dialect,
         ),
         _ => EvalValue::Unknown,
     }

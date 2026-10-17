@@ -266,23 +266,45 @@ fn entries_word(n: usize) -> &'static str {
     }
 }
 
-/// Print the rule registry as a table
-fn print_rules() {
+/// Print the rule registry as a table or JSON
+fn print_rules(format: crate::args::RulesFormat) {
     use sqlsift_core::rules::RULES;
-    let name_width = RULES.iter().map(|r| r.name.len()).max().unwrap_or(0);
-    println!(
-        "{:<6} {:<name_width$} {:<12} {:<8} DESCRIPTION",
-        "CODE", "NAME", "CATEGORY", "DEFAULT"
-    );
-    for rule in RULES {
-        println!(
-            "{:<6} {:<name_width$} {:<12} {:<8} {}",
-            rule.code,
-            rule.name,
-            rule.category.name(),
-            rule.default_level().name(),
-            rule.summary
-        );
+    match format {
+        crate::args::RulesFormat::Human => {
+            let name_width = RULES.iter().map(|r| r.name.len()).max().unwrap_or(0);
+            println!(
+                "{:<6} {:<name_width$} {:<12} {:<8} DESCRIPTION",
+                "CODE", "NAME", "CATEGORY", "DEFAULT"
+            );
+            for rule in RULES {
+                println!(
+                    "{:<6} {:<name_width$} {:<12} {:<8} {}",
+                    rule.code,
+                    rule.name,
+                    rule.category.name(),
+                    rule.default_level().name(),
+                    rule.summary
+                );
+            }
+        }
+        crate::args::RulesFormat::Json => {
+            let rules_json: Vec<_> = RULES
+                .iter()
+                .map(|rule| {
+                    serde_json::json!({
+                        "code": rule.code,
+                        "name": rule.name,
+                        "category": rule.category.name(),
+                        "default_level": rule.default_level().name(),
+                        "summary": rule.summary,
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rules_json).expect("serialize rules JSON")
+            );
+        }
     }
 }
 
@@ -551,22 +573,50 @@ fn load_dbt_catalogs(catalog: &mut Catalog, files: &[DbtCatalogFile]) -> Result<
     Ok(())
 }
 
-/// Build the catalog from the schema files. Schema warnings are printed to
+/// A schema file input with optional pre-loaded content (e.g. from git history)
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SchemaSource {
+    pub path: PathBuf,
+    pub content: Option<String>,
+}
+
+impl From<PathBuf> for SchemaSource {
+    fn from(path: PathBuf) -> Self {
+        Self {
+            path,
+            content: None,
+        }
+    }
+}
+
+impl From<&PathBuf> for SchemaSource {
+    fn from(path: &PathBuf) -> Self {
+        Self {
+            path: path.clone(),
+            content: None,
+        }
+    }
+}
+
+/// Build the schema catalog from schema sources, printing schema warnings to
 /// stderr (unless `!warn`); a file with errors is returned with its diagnostics
 /// instead.
-fn build_catalog(
-    schema_files: &[PathBuf],
+pub(crate) fn build_catalog_from_sources(
+    sources: &[SchemaSource],
     dialect: SqlDialect,
     warn: bool,
 ) -> Result<std::result::Result<Catalog, FileDiagnostics>> {
     let mut builder = SchemaBuilder::with_dialect(dialect);
-    for schema_file in schema_files {
-        let content = read_file(schema_file)?;
+    for source in sources {
+        let content = match &source.content {
+            Some(text) => text.clone(),
+            None => read_file(&source.path)?,
+        };
         if let Err(diags) =
-            with_analysis_stack(|| builder.parse_file(&content, &schema_file.display().to_string()))
+            with_analysis_stack(|| builder.parse_file(&content, &source.path.display().to_string()))
         {
             return Ok(Err(FileDiagnostics {
-                file: schema_file.display().to_string(),
+                file: source.path.display().to_string(),
                 source: content,
                 diagnostics: diags,
                 ..FileDiagnostics::default()
@@ -585,6 +635,18 @@ fn build_catalog(
         }
     }
     Ok(Ok(catalog))
+}
+
+/// Build the schema catalog from schema files, printing schema warnings to
+/// stderr (unless `!warn`); a file with errors is returned with its diagnostics
+/// instead.
+fn build_catalog(
+    schema_files: &[PathBuf],
+    dialect: SqlDialect,
+    warn: bool,
+) -> Result<std::result::Result<Catalog, FileDiagnostics>> {
+    let sources: Vec<SchemaSource> = schema_files.iter().map(SchemaSource::from).collect();
+    build_catalog_from_sources(&sources, dialect, warn)
 }
 
 /// The query files to analyze, and their templating (same order)
@@ -1342,8 +1404,8 @@ fn run(args: Args) -> Result<bool> {
             Ok(false)
         }
 
-        Command::Rules => {
-            print_rules();
+        Command::Rules { format } => {
+            print_rules(format);
             Ok(false)
         }
 
@@ -1513,15 +1575,12 @@ fn run(args: Args) -> Result<bool> {
             }
             Ok(errors > 0)
         }
-
         Command::Parse { file } => {
-            use sqlparser::parser::Parser;
-
             // Parse and display AST (for debugging)
             let content = read_file(&file)?;
 
             let dialect = SqlDialect::default().parser_dialect();
-            match Parser::parse_sql(dialect.as_ref(), &content) {
+            match sqlsift_core::stack::parse_sql(dialect.as_ref(), &content) {
                 Ok(statements) => {
                     for (i, stmt) in statements.iter().enumerate() {
                         println!("Statement {}:", i + 1);
