@@ -10,6 +10,7 @@ import * as fs from "fs";
 
 let client: LanguageClient | undefined;
 let outputChannel: OutputChannel | undefined;
+let restarting: Promise<void> = Promise.resolve();
 
 function getBundledServerPath(context: ExtensionContext): string | undefined {
   const binaryName =
@@ -102,26 +103,27 @@ async function startServer(context: ExtensionContext): Promise<void> {
   try {
     await client.start();
   } catch (err) {
-    window.showErrorMessage(`Failed to start sqlsift language server: ${err}`);
+    outputChannel?.appendLine(`Failed to start sqlsift language server: ${err}`);
   }
 }
 
-export async function activate(context: ExtensionContext) {
+export function activate(context: ExtensionContext) {
   outputChannel = window.createOutputChannel("sqlsift");
   context.subscriptions.push(outputChannel);
 
-  await startServer(context);
-
   context.subscriptions.push(
-    commands.registerCommand("sqlsift.restartServer", async () => {
-      await startServer(context);
+    commands.registerCommand("sqlsift.restartServer", () => {
+      restarting = restarting.then(() => startServer(context));
+      return restarting;
     }),
     commands.registerCommand("sqlsift.showOutput", () => {
       outputChannel?.show();
     })
   );
+
+  restarting = restarting.then(() => startServer(context));
 }
 
 export function deactivate(): Thenable<void> | undefined {
-  return client?.stop();
+  return client?.stop().catch(() => {});
 }
