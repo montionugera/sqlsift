@@ -161,7 +161,7 @@ error[E0002]: Column 'titel' not found in table 'posts'
     = help: Did you mean 'title'?
 ```
 
-A statement belongs to the last `-- name: <Name> :<command>` comment before it. The name is the `query_name` field in JSON output, a logical location in SARIF output, and is added to the message in SARIF, `github` and editor diagnostics.
+A statement belongs to the last `-- name: <Name> :<command>` or `/* name: <Name> :<command> */` comment before it. The name is the `query_name` field in JSON output, a logical location in SARIF output, and is added to the message in SARIF, `github` and editor diagnostics.
 
 sqlc's named parameters are untyped placeholders, like `$1`:
 

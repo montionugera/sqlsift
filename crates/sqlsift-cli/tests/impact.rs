@@ -257,6 +257,120 @@ fn base_picks_changed_schema_files() {
 }
 
 #[test]
+fn base_with_in_place_edited_schema_file() {
+    let project = Project::new(&[
+        (
+            "schema.sql",
+            "CREATE TABLE users (id bigint PRIMARY KEY, email text NOT NULL, name text);\n\
+             CREATE TABLE posts (id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id), title text);\n",
+        ),
+        (
+            "q.sql",
+            "SELECT email FROM users WHERE id = 1;\nSELECT title FROM posts;\n",
+        ),
+    ]);
+    project.git(&["init", "-q", "-b", "main"]);
+    project.git(&["add", "."]);
+    project.git(&["commit", "-q", "-m", "init"]);
+
+    // Edit schema.sql in place (rename email -> email_address)
+    fs::write(
+        project.path.join("schema.sql"),
+        "CREATE TABLE users (id bigint PRIMARY KEY, email_address text NOT NULL, name text);\n\
+         CREATE TABLE posts (id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id), title text);\n",
+    )
+    .unwrap();
+
+    let args = [
+        "--schema",
+        "schema.sql",
+        "--queries",
+        "q.sql",
+        "--base",
+        "main",
+    ];
+    let (json, code) = project.json(&args);
+    assert_eq!(code, Some(1));
+
+    // Expected: changed table public.users, NOT added table public.users or added table public.posts
+    let changes = json["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["name"], "public.users");
+    assert_eq!(changes[0]["kind"], "changed");
+
+    // The introduced diagnostic is E0002 for 'email'
+    assert_eq!(file_names(&json["introduced"]), ["q.sql"]);
+    let introduced = &json["introduced"][0]["diagnostics"][0];
+    assert_eq!(introduced["code"], "E0002");
+    assert_eq!(introduced["line"], 1);
+
+    // Resolved list must be empty (nothing was fixed)
+    assert!(json["resolved"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn base_with_explicit_committed_migration() {
+    let project = Project::new(&files(&[]));
+    project.git(&["init", "-q", "-b", "main"]);
+    project.git(&["add", "."]);
+    project.git(&["commit", "-q", "-m", "init"]);
+
+    let args = [
+        "migrations/002_rename.sql",
+        "--base",
+        "HEAD",
+        "--schema-dir",
+        "migrations",
+        "--queries",
+        "queries/*.sql",
+    ];
+    let (json, code) = project.json(&args);
+    assert_eq!(code, Some(1));
+    assert_eq!(json["changes"][0]["name"], "public.users");
+    assert_eq!(json["changes"][0]["kind"], "changed");
+    assert_eq!(file_names(&json["introduced"]), ["queries/users.sql"]);
+    let introduced = &json["introduced"][0]["diagnostics"][0];
+    assert_eq!(introduced["code"], "E0002");
+    assert_eq!(introduced["line"], 1);
+}
+
+#[test]
+fn base_with_renamed_schema_file() {
+    let project = Project::new(&[
+        (
+            "db/schema.sql",
+            "CREATE TABLE users (id bigint PRIMARY KEY, email text NOT NULL);\n\
+             CREATE TABLE posts (id bigint PRIMARY KEY, title text);\n",
+        ),
+        (
+            "q.sql",
+            "SELECT email FROM users;\nSELECT title FROM posts;\n",
+        ),
+    ]);
+    project.git(&["init", "-q", "-b", "main"]);
+    project.git(&["add", "."]);
+    project.git(&["commit", "-q", "-m", "init"]);
+
+    fs::create_dir_all(project.path.join("sql")).unwrap();
+    project.git(&["mv", "db/schema.sql", "sql/schema.sql"]);
+
+    let args = [
+        "--schema",
+        "sql/schema.sql",
+        "--queries",
+        "q.sql",
+        "--base",
+        "main",
+    ];
+    let (json, code) = project.json(&args);
+    assert_eq!(code, Some(0));
+
+    assert!(json["changes"].as_array().unwrap().is_empty());
+    assert!(json["introduced"].as_array().unwrap().is_empty());
+    assert!(json["resolved"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn references_list_unchanged_uses_of_changed_tables() {
     let project = Project::new(&[
         INIT,

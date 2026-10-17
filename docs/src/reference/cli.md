@@ -160,7 +160,7 @@ Options:
 
 `impact` builds the schema twice, without and with the migrations, checks the query files against both and reports only the diagnostics that differ: those the change introduces and those it fixes. Problems the queries already had are not shown.
 
-- A migration that is one of the schema files is left out of the "before" schema together with every schema file after it (files are applied in order: `--schema` files first, then `--schema-dir` files in version order). A migration that isn't one of them is applied after all schema files.
+- A migration that is one of the schema files is left out of the "before" schema together with every schema file after it (files are applied in order: `--schema` files first, then `--schema-dir` files in version order). A migration that isn't one of them is applied after all schema files. With `--base`, an existing schema file modified in place uses its content from the merge base in the "before" schema, while newly added schema files are left out of "before".
 - Only query files that name a changed table or view are checked, so the run stays fast on large projects. Changes that can affect any query (enum types, the search path, functions the schema defines) check every file.
 - A diagnostic whose message changes but stays at the same place (a different type in a type mismatch) counts as the same problem.
 
@@ -303,6 +303,13 @@ Options:
 Without schema arguments, the schema settings from `sqlsift.toml` are used. See [Loading your schema](../guide/schema.md#inspecting-the-loaded-schema).
 
 ## `sqlsift rules`
+
+```
+sqlsift rules [OPTIONS]
+
+Options:
+  -f, --format <FORMAT>     Output format: human, json [default: human]
+```
 
 Prints every rule with its code, name, category, default level and description. See [Rules and levels](../guide/rules.md).
 

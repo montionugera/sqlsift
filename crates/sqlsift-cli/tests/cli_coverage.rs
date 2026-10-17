@@ -1703,6 +1703,31 @@ fn rules_subcommand_lists_the_registry() {
 }
 
 #[test]
+fn rules_subcommand_format_json() {
+    let t = TempDir::new("rules-json");
+    let human = t.run(&["rules"]);
+    human.assert_code(0);
+    let human_rule_count = human.stdout.lines().count().saturating_sub(1);
+
+    let run = t.run(&["rules", "--format", "json"]);
+    run.assert_code(0);
+    let rules: Vec<Value> = serde_json::from_str(&run.stdout).expect("valid JSON array");
+    assert_eq!(rules.len(), human_rule_count);
+
+    let e0002 = rules
+        .iter()
+        .find(|r| r["code"] == "E0002")
+        .expect("E0002 in rules list");
+    assert_eq!(e0002["name"], "column-not-found");
+    assert_eq!(e0002["category"], "correctness");
+    assert_eq!(e0002["default_level"], "error");
+    assert_eq!(
+        e0002["summary"],
+        "Referenced column does not exist in table"
+    );
+}
+
+#[test]
 fn disable_parse_error_code() {
     let t = with_users_schema("disable-e1000");
     t.write("q.sql", "SELEC id FROM users;\n");

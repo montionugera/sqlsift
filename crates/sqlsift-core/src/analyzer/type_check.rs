@@ -17,7 +17,7 @@ use std::ops::ControlFlow;
 
 use sqlparser::ast::{
     AssignmentTarget, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
-    Insert, Parens, SetExpr, Spanned, Value, ValueWithSpan, Visit, Visitor,
+    Insert, Parens, SetExpr, Spanned, UnaryOperator, Value, ValueWithSpan, Visit, Visitor,
 };
 
 use crate::ast_ext::{column_ident, insert_table, name_last, ObjectNamePartExt};
@@ -101,7 +101,7 @@ impl Resolver<'_> {
         // MySQL compares an enum with any string (and strict mode rejects an
         // invalid value only when it is assigned)
         if self.dialect.converts_mismatched_types()
-            && !(assignment && self.assignment_rejected(left, right))
+            && !(assignment && self.assignment_rejected(left, right, None, false))
         {
             diag.kind = DiagnosticKind::ImplicitConversion;
         }
@@ -138,10 +138,52 @@ impl Resolver<'_> {
     /// Whether the database rejects assigning `value` to a column of type `column`
     /// that [`Self::type_conflict`] reported. MySQL (in its default strict mode)
     /// rejects only a string that isn't a value of the column's type; SQLite
-    /// stores any value
-    fn assignment_rejected(&self, column: &ExpressionType, value: &ExpressionType) -> bool {
+    /// stores any value, except in a STRICT table where type mismatches for literals
+    /// that SQLite certainly cannot convert are rejected at run time
+    fn assignment_rejected(
+        &self,
+        column: &ExpressionType,
+        value: &ExpressionType,
+        value_expr: Option<&Expr>,
+        table_strict: bool,
+    ) -> bool {
         match self.dialect {
-            SqlDialect::SQLite => false,
+            SqlDialect::SQLite => {
+                if !table_strict {
+                    return false;
+                }
+                let ExpressionType::Known(col_type) = column else {
+                    return false;
+                };
+                let Some(expr) = value_expr else {
+                    return false;
+                };
+                match value {
+                    ExpressionType::StringLiteral(lit) => {
+                        if col_type.is_integer() {
+                            !is_sqlite_lossless_integer(lit)
+                        } else if matches!(
+                            col_type,
+                            SqlType::Real | SqlType::DoublePrecision | SqlType::Decimal { .. }
+                        ) {
+                            lit.trim().parse::<f64>().is_err()
+                        } else {
+                            matches!(col_type, SqlType::Bytea)
+                        }
+                    }
+                    _ => {
+                        if let Some(num) = literal_number(expr) {
+                            if col_type.is_integer() {
+                                num.fract() != 0.0 || !num.is_finite()
+                            } else {
+                                matches!(col_type, SqlType::Bytea)
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                }
+            }
             SqlDialect::MySQL => matches!(
                 (column, value),
                 (ExpressionType::Known(_), ExpressionType::StringLiteral(_))
@@ -240,6 +282,8 @@ impl Resolver<'_> {
         &self,
         column_type: &ExpressionType,
         value_type: &ExpressionType,
+        value_expr: Option<&Expr>,
+        table_strict: bool,
     ) -> Option<(String, String)> {
         if let (ExpressionType::Known(col_type), ExpressionType::Known(val_type)) =
             (column_type, value_type)
@@ -249,6 +293,51 @@ impl Resolver<'_> {
             // reverse or a comparison requires an explicit cast
             if col_type.is_string() && self.is_enum_type(val_type) {
                 return None;
+            }
+            if self.dialect == SqlDialect::SQLite && table_strict && col_type.is_integer() {
+                if let Some(expr) = value_expr {
+                    if let Some(num) = literal_number(expr) {
+                        if num.fract() != 0.0 || !num.is_finite() {
+                            return Some((
+                                col_type.display_name_in(self.dialect),
+                                val_type.display_name_in(self.dialect),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if self.dialect == SqlDialect::SQLite && table_strict {
+            if let (ExpressionType::Known(col_type), ExpressionType::StringLiteral(lit)) =
+                (column_type, value_type)
+            {
+                if col_type.is_integer() {
+                    if !is_sqlite_lossless_integer(lit) {
+                        return Some((
+                            col_type.display_name_in(self.dialect),
+                            SqlType::Text.display_name_in(self.dialect),
+                        ));
+                    }
+                    return None;
+                }
+                if matches!(
+                    col_type,
+                    SqlType::Real | SqlType::DoublePrecision | SqlType::Decimal { .. }
+                ) {
+                    if lit.trim().parse::<f64>().is_err() {
+                        return Some((
+                            col_type.display_name_in(self.dialect),
+                            SqlType::Text.display_name_in(self.dialect),
+                        ));
+                    }
+                    return None;
+                }
+                if matches!(col_type, SqlType::Bytea) {
+                    return Some((
+                        col_type.display_name_in(self.dialect),
+                        SqlType::Text.display_name_in(self.dialect),
+                    ));
+                }
             }
         }
         self.type_conflict(column_type, value_type)
@@ -706,9 +795,12 @@ impl Resolver<'_> {
                 ) {
                     continue;
                 }
-                if let Some((expected, actual)) =
-                    self.assignment_conflict(&column_type, &value_type)
-                {
+                if let Some((expected, actual)) = self.assignment_conflict(
+                    &column_type,
+                    &value_type,
+                    Some(value_expr),
+                    table_def.strict,
+                ) {
                     let mut diag = assignment_mismatch(col_name, &expected, &actual);
                     if let (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) =
                         (&column_type, &value_type)
@@ -725,7 +817,12 @@ impl Resolver<'_> {
                     }
                     // Literals carry no location: fall back to the target column
                     diag.span = located_span(value_expr).or(column_span);
-                    if self.assignment_rejected(&column_type, &value_type) {
+                    if self.assignment_rejected(
+                        &column_type,
+                        &value_type,
+                        Some(value_expr),
+                        table_def.strict,
+                    ) {
                         self.diagnostics.push(diag);
                     } else {
                         self.push_mismatch(diag);
@@ -800,7 +897,12 @@ impl Resolver<'_> {
             ) {
                 continue;
             }
-            if let Some((expected, actual)) = self.assignment_conflict(&column_type, &value_type) {
+            if let Some((expected, actual)) = self.assignment_conflict(
+                &column_type,
+                &value_type,
+                Some(&assignment.value),
+                table_def.strict,
+            ) {
                 let mut diag = assignment_mismatch(&target.ident().value, &expected, &actual);
                 if let (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) =
                     (&column_type, &value_type)
@@ -817,7 +919,12 @@ impl Resolver<'_> {
                 }
                 // Literals carry no location: fall back to the target column
                 diag.span = located_span(&assignment.value).or(Some(target_span));
-                if self.assignment_rejected(&column_type, &value_type) {
+                if self.assignment_rejected(
+                    &column_type,
+                    &value_type,
+                    Some(&assignment.value),
+                    table_def.strict,
+                ) {
                     self.diagnostics.push(diag);
                 } else {
                     self.push_mismatch(diag);
@@ -1598,6 +1705,42 @@ fn binary_op_result_type(
             ExpressionType::Known(t)
         }
         _ => ExpressionType::Unknown,
+    }
+}
+
+/// Whether a string literal can be losslessly converted to an integer in SQLite STRICT tables
+#[allow(clippy::cast_precision_loss)]
+fn is_sqlite_lossless_integer(s: &str) -> bool {
+    let trimmed = s.trim();
+    if trimmed.parse::<i128>().is_ok() {
+        return true;
+    }
+    if let Ok(f) = trimmed.parse::<f64>() {
+        return f.is_finite()
+            && f.fract() == 0.0
+            && f >= (i64::MIN as f64)
+            && f <= (i64::MAX as f64);
+    }
+    false
+}
+
+/// A literal number from an expression, including unary minus/plus and nested parentheses
+fn literal_number(expr: &Expr) -> Option<f64> {
+    match expr {
+        Expr::Value(ValueWithSpan {
+            value: Value::Number(n, _),
+            ..
+        }) => n.parse::<f64>().ok(),
+        Expr::UnaryOp {
+            op: UnaryOperator::Minus,
+            expr: inner,
+        } => literal_number(inner).map(|n| -n),
+        Expr::UnaryOp {
+            op: UnaryOperator::Plus,
+            expr: inner,
+        } => literal_number(inner),
+        Expr::Nested(inner) => literal_number(inner),
+        _ => None,
     }
 }
 

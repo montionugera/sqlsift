@@ -722,6 +722,7 @@ impl std::fmt::Display for QualifiedName {
 
 /// Table definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct TableDef {
     pub name: QualifiedName,
     pub columns: IndexMap<String, ColumnDef>,
@@ -751,6 +752,9 @@ pub struct TableDef {
     /// Default collation (e.g. MySQL `DEFAULT COLLATE = utf8mb4_unicode_ci`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collation: Option<String>,
+    /// Whether this table was created with STRICT typing (SQLite STRICT tables)
+    #[serde(default)]
+    pub strict: bool,
 }
 
 /// A column that ALTER TABLE renamed or dropped
@@ -781,6 +785,7 @@ impl TableDef {
             before_update_trigger: false,
             character_set: None,
             collation: None,
+            strict: false,
         }
     }
 

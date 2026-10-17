@@ -295,7 +295,11 @@ pub enum Command {
     },
 
     /// List all rules with their category and default level
-    Rules,
+    Rules {
+        /// Output format
+        #[arg(short, long, value_enum, default_value_t = RulesFormat::Human)]
+        format: RulesFormat,
+    },
 
     /// Display the schema sqlsift loaded (tables, views, enum types)
     ///
@@ -436,6 +440,16 @@ pub enum BaselineCommand {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum, Default)]
 pub enum BaselineFormat {
     /// Human-readable listing
+    #[default]
+    Human,
+    /// JSON output
+    Json,
+}
+
+/// Output format of `sqlsift rules`
+#[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum, Default)]
+pub enum RulesFormat {
+    /// Human-readable table
     #[default]
     Human,
     /// JSON output
