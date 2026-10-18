@@ -121,6 +121,22 @@ fn e0028_limit_without_order_by() {
 }
 
 #[test]
+fn e0028_once_under_explain_prepare_and_declare() {
+    for sql in [
+        "PREPARE p AS SELECT id FROM users LIMIT 1",
+        "EXPLAIN SELECT id FROM (SELECT id FROM users LIMIT 1) s",
+        "EXPLAIN (FORMAT JSON) SELECT id FROM users LIMIT 1",
+        "DECLARE c CURSOR FOR SELECT id FROM users LIMIT 1",
+        "DECLARE c SCROLL CURSOR WITH HOLD FOR SELECT id FROM users LIMIT 1",
+    ] {
+        assert_eq!(codes(sql), ["E0028"], "{sql}");
+    }
+    // The other restriction rules still see the wrapped statement
+    assert_eq!(codes("EXPLAIN UPDATE users SET name = 'x'"), ["E0024"]);
+    assert_eq!(codes("PREPARE p AS SELECT * FROM users"), ["E0026"]);
+}
+
+#[test]
 fn e0028_has_a_location() {
     for (sql, keyword, column) in [
         ("SELECT id FROM users\nLIMIT 20 OFFSET 40", "LIMIT", 7),

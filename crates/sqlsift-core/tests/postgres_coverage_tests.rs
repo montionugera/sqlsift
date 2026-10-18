@@ -1795,11 +1795,13 @@ fn explain_prepare_and_declare_cursor_queries_are_checked() {
         DECLARE c CURSOR FOR SELECT nope FROM users;
         EXPLAIN UPDATE users SET nope = 1;
         PREPARE ins AS INSERT INTO users (id, nope) VALUES ($1, $2);
+        EXPLAIN (FORMAT JSON) SELECT nope FROM users;
+        DECLARE h SCROLL CURSOR WITH HOLD FOR SELECT nope FROM users;
     ";
     let diagnostics = analyze_with(schema, invalid);
     assert_eq!(
         kinds_of(&diagnostics),
-        vec![DiagnosticKind::ColumnNotFound; 6],
+        vec![DiagnosticKind::ColumnNotFound; 8],
         "{diagnostics:#?}"
     );
     for d in &diagnostics {
@@ -1813,6 +1815,8 @@ fn explain_prepare_and_declare_cursor_queries_are_checked() {
         DECLARE c CURSOR FOR SELECT id, name FROM users;
         EXPLAIN UPDATE users SET name = 'a' WHERE id = 1;
         PREPARE ins AS INSERT INTO users (id, name) VALUES ($1, $2);
+        EXPLAIN (FORMAT JSON) SELECT id FROM users;
+        DECLARE h SCROLL CURSOR WITH HOLD FOR SELECT id FROM users;
     ";
     let diagnostics = analyze_with(schema, valid);
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
