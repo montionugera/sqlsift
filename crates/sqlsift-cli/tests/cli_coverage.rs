@@ -2775,6 +2775,33 @@ fn gitlab_format_fingerprint_is_stable_across_line_moves_and_runs() {
 }
 
 #[test]
+fn gitlab_format_fingerprints_differ_for_identical_findings() {
+    let t = with_users_schema("gitlab-dup");
+    t.write("q.sql", "SELECT nme FROM users;\nSELECT nme FROM users;\n");
+    let run = t.run(&["check", "-s", "schema.sql", "-f", "gitlab", "q.sql"]);
+    run.assert_code(1);
+    let v: Value = serde_json::from_str(&run.stdout).expect("valid JSON");
+    assert_eq!(v.as_array().unwrap().len(), 2);
+    assert_eq!(v[0]["description"], v[1]["description"]);
+    assert_ne!(
+        v[0]["fingerprint"], v[1]["fingerprint"],
+        "GitLab drops issues with the same fingerprint"
+    );
+}
+
+#[test]
+fn gitlab_format_strips_leading_dot_slash_from_path() {
+    let t = with_users_schema("gitlab-dotslash");
+    t.write("sql/q.sql", "SELECT nme FROM users;\n");
+    let plain = t.run(&["check", "-s", "schema.sql", "-f", "gitlab", "sql/q.sql"]);
+    let dotted = t.run(&["check", "-s", "schema.sql", "-f", "gitlab", "./sql/q.sql"]);
+    let plain: Value = serde_json::from_str(&plain.stdout).expect("valid JSON");
+    let dotted: Value = serde_json::from_str(&dotted.stdout).expect("valid JSON");
+    assert_eq!(dotted[0]["location"]["path"], "sql/q.sql");
+    assert_eq!(plain[0]["fingerprint"], dotted[0]["fingerprint"]);
+}
+
+#[test]
 fn gitlab_format_with_no_diagnostics_prints_empty_array() {
     let t = with_users_schema("gitlab-clean");
     t.write("q.sql", "SELECT id FROM users;\n");

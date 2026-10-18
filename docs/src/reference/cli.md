@@ -82,7 +82,7 @@ Options:
       --dbt-catalog <PATH>  dbt catalog.json with the columns of the models and sources
                             that ref() / source() name (alpha) [default:
                             target/catalog.json of the dbt project, if it exists]
-  -f, --format <FORMAT>     Output format: human, json, sarif, github [default: human]
+  -f, --format <FORMAT>     Output format: human, json, sarif, github, gitlab [default: human]
       --max-errors <N>      Maximum number of errors before stopping [default: 100, 0 = unlimited]
       --max-warnings <N>    Fail (exit 1) when more than N warnings are reported
       --baseline <PATH>     Baseline file of known diagnostics, which are not reported
@@ -155,7 +155,7 @@ Options:
   -d, --dialect <NAME>      SQL dialect [default: postgresql]
       --templating <ENGINE> Query file templating: jinja, none
       --dbt-catalog <PATH>  dbt catalog.json (alpha)
-  -f, --format <FORMAT>     Output format: human, json, sarif, github [default: human]
+  -f, --format <FORMAT>     Output format: human, json, sarif, github, gitlab [default: human]
 ```
 
 `impact` builds the schema twice, without and with the migrations, checks the query files against both and reports only the diagnostics that differ: those the change introduces and those it fixes. Problems the queries already had are not shown.

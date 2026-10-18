@@ -86,7 +86,7 @@ A [GitLab Code Quality report](https://docs.gitlab.com/ci/testing/code_quality/#
 ]
 ```
 
-`severity` is `major` for errors and `minor` for warnings. `fingerprint` is a 64-bit FNV-1a hash of the file path, rule code and message, stable across line moves. In GitLab CI, redirect stdout to `gl-code-quality-report.json` and upload it under `artifacts:reports:codequality` (see [GitLab CI](../integrations/ci.md#gitlab-ci-code-quality)).
+`severity` is `major` for errors and `minor` for warnings. `fingerprint` is a 64-bit FNV-1a hash of the file path, rule code, message and the occurrence of that rule and message in the file, so it is stable across line moves and identical findings on different lines get different fingerprints. `location.path` is the path as given on the command line with `\` turned into `/` and a leading `./` dropped; GitLab expects paths relative to the repository root, so run sqlsift from the repository root with relative paths. In GitLab CI, redirect stdout to `gl-code-quality-report.json` and upload it under `artifacts:reports:codequality` (see [GitLab CI](../integrations/ci.md#gitlab-ci-code-quality)).
 
 ## Schema JSON
 

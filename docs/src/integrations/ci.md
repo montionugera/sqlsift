@@ -199,5 +199,5 @@ sqlsift:
     when: always
 ```
 
-`when: always` uploads the report even when `sqlsift check` finds errors and exits non-zero.
+`when: always` uploads the report even when `sqlsift check` finds errors and exits non-zero. Run sqlsift from the repository root (the default working directory of a job) with relative paths: GitLab matches the report paths against the repository.
 

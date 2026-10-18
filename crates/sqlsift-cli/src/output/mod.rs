@@ -402,12 +402,20 @@ fn escape_github_property(text: &str) -> String {
         .replace(',', "%2C")
 }
 
-/// Print diagnostics in GitLab Code Quality report format
+/// Print diagnostics in GitLab Code Quality report format. GitLab matches
+/// `location.path` against the repository, so it should be run from the
+/// repository root; a leading `./` is dropped.
 fn print_gitlab(files: &[&FileDiagnostics]) {
     let mut reports = Vec::new();
     for f in files {
-        let path = f.file.replace('\\', "/");
+        let path = gitlab_path(&f.file);
+        // Occurrences of each (rule, message) in the file, so that identical
+        // findings get distinct fingerprints (GitLab drops duplicates)
+        let mut seen: std::collections::HashMap<(&str, &str), usize> =
+            std::collections::HashMap::new();
         for d in &f.diagnostics {
+            let n = seen.entry((d.code(), d.message.as_str())).or_default();
+            *n += 1;
             let line = location(d, &f.source).map_or(1, |(l, _)| l);
             let severity = match d.severity {
                 Severity::Error => "major",
@@ -420,6 +428,8 @@ fn print_gitlab(files: &[&FileDiagnostics]) {
             hash_data.extend_from_slice(d.code().as_bytes());
             hash_data.push(b':');
             hash_data.extend_from_slice(d.message.as_bytes());
+            hash_data.push(b':');
+            hash_data.extend_from_slice(n.to_string().as_bytes());
             let fingerprint = format!("{:016x}", sqlsift_core::baseline::fnv1a_64(&hash_data));
 
             reports.push(serde_json::json!({
@@ -437,6 +447,11 @@ fn print_gitlab(files: &[&FileDiagnostics]) {
         }
     }
     println!("{}", serde_json::to_string_pretty(&reports).unwrap());
+}
+
+/// The report path of a file: `/` separators and no leading `./`
+fn gitlab_path(file: &str) -> String {
+    file.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
 fn sarif_rule(kind: DiagnosticKind, description: &str) -> serde_json::Value {
