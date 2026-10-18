@@ -403,7 +403,7 @@ fn sarif_rule(kind: DiagnosticKind, description: &str) -> serde_json::Value {
         "id": kind.code(),
         "name": kind.name(),
         "shortDescription": { "text": description },
-        "helpUri": sqlsift_core::rules::rule_doc_url(kind.code())
+        "helpUri": kind.doc_url()
     })
 }
 

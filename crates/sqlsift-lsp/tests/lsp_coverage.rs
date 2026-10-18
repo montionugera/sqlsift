@@ -367,7 +367,7 @@ fn did_open_publishes_diagnostics_with_zero_indexed_range() {
     assert_eq!(d["code"], "E0002");
     assert_eq!(
         d["codeDescription"]["href"],
-        "https://yukikotani231.github.io/sqlsift/docs/rules/E0002.html"
+        "https://sqlsift.dev/docs/rules/E0002.html"
     );
     assert_eq!(d["source"], "sqlsift");
     assert_eq!(d["severity"], 1);

@@ -15,7 +15,7 @@ pub fn to_lsp_diagnostics(diagnostics: &[Diagnostic], text: &str) -> Vec<lsp_typ
 }
 
 fn to_lsp_diagnostic(diag: &Diagnostic, text: &str) -> lsp_types::Diagnostic {
-    let code_description = Url::parse(&sqlsift_core::rules::rule_doc_url(diag.code()))
+    let code_description = Url::parse(&diag.kind.doc_url())
         .ok()
         .map(|href| CodeDescription { href });
 
@@ -188,8 +188,7 @@ mod tests {
         assert_eq!(
             lsp_diag.code_description,
             Some(CodeDescription {
-                href: Url::parse("https://yukikotani231.github.io/sqlsift/docs/rules/E0002.html")
-                    .unwrap(),
+                href: Url::parse("https://sqlsift.dev/docs/rules/E0002.html").unwrap(),
             })
         );
     }

@@ -140,11 +140,6 @@ pub struct Rule {
 }
 
 impl Rule {
-    /// URL of this rule's page in the user guide
-    pub fn doc_url(&self) -> String {
-        rule_doc_url(self.code)
-    }
-
     /// Level of the rule unless configured otherwise
     pub fn default_level(&self) -> RuleLevel {
         self.category.default_level()
@@ -426,11 +421,11 @@ impl DiagnosticKind {
 ///
 /// assert_eq!(
 ///     rule_doc_url("E0002"),
-///     "https://yukikotani231.github.io/sqlsift/docs/rules/E0002.html"
+///     "https://sqlsift.dev/docs/rules/E0002.html"
 /// );
 /// ```
 pub fn rule_doc_url(code: &str) -> String {
-    format!("https://yukikotani231.github.io/sqlsift/docs/rules/{code}.html")
+    format!("https://sqlsift.dev/docs/rules/{code}.html")
 }
 
 /// Look up a rule by code (`E0002`) or name (`column-not-found`), ignoring case
