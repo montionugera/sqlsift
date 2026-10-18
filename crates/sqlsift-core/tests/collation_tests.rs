@@ -1,8 +1,9 @@
 //! E0036 illegal-mix-of-collations: Incompatible collations in MySQL expressions.
 //!
-//! In MySQL, comparisons, LIKE, IN, JOIN ON/USING, CASE, COALESCE, and set operations
-//! combining two column references with different collations fail at runtime with
-//! error 1267 (Illegal mix of collations).
+//! In MySQL, comparisons, LIKE, IN, JOIN ON/USING and `CASE x WHEN y` comparing two
+//! column references with different collations of one charset fail at runtime with
+//! error 1267 (Illegal mix of collations). UNION, COALESCE, IFNULL and CASE results
+//! fall back to the charset's _bin collation instead.
 
 use sqlsift_core::dialect::SqlDialect;
 use sqlsift_core::schema::SchemaBuilder;
@@ -141,7 +142,8 @@ fn test_in_subquery_different_collations() {
 
 #[test]
 fn test_case_different_collations() {
-    assert_reports_e0036(
+    // The result of branches of one charset falls back to the _bin collation
+    assert_mysql_clean(
         "SELECT CASE WHEN id > 1 THEN g.name ELSE u.name END FROM t_general g, t_unicode u",
     );
     assert_reports_e0036(
@@ -151,13 +153,14 @@ fn test_case_different_collations() {
 
 #[test]
 fn test_coalesce_different_collations() {
-    assert_reports_e0036("SELECT COALESCE(g.name, u.name) FROM t_general g, t_unicode u");
+    assert_mysql_clean("SELECT COALESCE(g.name, u.name) FROM t_general g, t_unicode u");
+    assert_mysql_clean("SELECT IFNULL(g.name, u.name) FROM t_general g, t_unicode u");
 }
 
 #[test]
 fn test_set_operations_different_collations() {
-    assert_reports_e0036("SELECT name FROM t_general UNION SELECT name FROM t_unicode");
-    assert_reports_e0036("SELECT name FROM t_general UNION ALL SELECT name FROM t_unicode");
+    assert_mysql_clean("SELECT name FROM t_general UNION SELECT name FROM t_unicode");
+    assert_mysql_clean("SELECT name FROM t_general UNION ALL SELECT name FROM t_unicode");
 }
 
 #[test]

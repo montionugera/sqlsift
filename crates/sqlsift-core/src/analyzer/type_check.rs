@@ -699,20 +699,6 @@ impl Resolver<'_> {
                     .with_help("Corresponding columns in UNION/INTERSECT/EXCEPT should be type-compatible."),
                 );
             }
-            if self.dialect == SqlDialect::MySQL {
-                let op_name = match right_expr {
-                    SetExpr::SetOperation { op, .. } => op.to_string(),
-                    _ => "UNION".to_string(),
-                };
-                self.check_collation_mix_raw(
-                    l.collation.as_deref(),
-                    l.character_set.as_deref(),
-                    r.collation.as_deref(),
-                    r.character_set.as_deref(),
-                    &op_name,
-                    Some(Span::from_sqlparser(&right_expr.span())),
-                );
-            }
         }
     }
 
@@ -1252,33 +1238,6 @@ impl Resolver<'_> {
             op_name,
             span,
         )
-    }
-
-    /// Check COALESCE / IFNULL function arguments for incompatible collations (MySQL E0036)
-    pub(super) fn check_coalesce_collation(&mut self, func: &sqlparser::ast::Function) {
-        if self.dialect != SqlDialect::MySQL {
-            return;
-        }
-        let Some(name) = func
-            .name
-            .0
-            .last()
-            .map(|p| p.ident().value.to_ascii_uppercase())
-        else {
-            return;
-        };
-        if name != "COALESCE" && name != "IFNULL" {
-            return;
-        }
-        let args = unnamed_args(func);
-        for i in 0..args.len() {
-            for j in (i + 1)..args.len() {
-                let span = located_span(args[i]).or_else(|| located_span(args[j]));
-                if self.check_collation_mix(args[i], args[j], &name, span) {
-                    return;
-                }
-            }
-        }
     }
 
     pub(super) fn infer_qualified_column(

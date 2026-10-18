@@ -487,6 +487,13 @@ impl SchemaBuilder {
             .map(|n| n.to_string());
 
         if kind == "ALTER TABLE" {
+            if self.dialect == SqlDialect::MySQL {
+                if let Some(table) = split_object_names(&name_tokens[..name_len]).first() {
+                    let table = self.catalog.qualified_name(table);
+                    let ops = sig_tokens.get(i + name_len..).unwrap_or(&[]);
+                    self.apply_mysql_table_charset(&table, ops);
+                }
+            }
             // Only warn for operations that change columns; constraints, OWNER TO,
             // ENABLE TRIGGER, REPLICA IDENTITY, ATTACH PARTITION, ... don't affect
             // name resolution
@@ -558,6 +565,87 @@ impl SchemaBuilder {
                 "The statement was ignored, so queries that use it may report missing tables or columns",
             ),
         );
+    }
+
+    /// Apply the MySQL `ALTER TABLE` operations sqlparser doesn't parse that set the
+    /// character set and collation: `CONVERT TO CHARACTER SET cs [COLLATE coll]` (the
+    /// string columns and the table default) and `[DEFAULT] CHARACTER SET [=] cs`,
+    /// `[DEFAULT] COLLATE [=] coll` (the default of columns added afterwards).
+    /// Without a COLLATE, the collation is the charset's default, which isn't known.
+    fn apply_mysql_table_charset(&mut self, table_name: &QualifiedName, ops: &[&Token]) {
+        let Some(table) = self.catalog.get_table_mut(table_name) else {
+            return;
+        };
+        let end = ops
+            .iter()
+            .rposition(|t| !matches!(t, Token::SemiColon | Token::EOF))
+            .map_or(0, |last| last + 1);
+        for op in ops[..end].split(|t| matches!(t, Token::Comma)) {
+            let word = |i: usize| match op.get(i) {
+                Some(Token::Word(w)) if w.quote_style.is_none() => w.value.to_uppercase(),
+                _ => String::new(),
+            };
+            let convert = word(0) == "CONVERT" && word(1) == "TO";
+            let mut i = if convert { 2 } else { 0 };
+            let (mut charset, mut collation) = (None, None);
+            while i < op.len() {
+                if word(i) == "DEFAULT" {
+                    i += 1;
+                }
+                let is_charset = match word(i).as_str() {
+                    "CHARACTER" if word(i + 1) == "SET" => {
+                        i += 2;
+                        true
+                    }
+                    "CHARSET" => {
+                        i += 1;
+                        true
+                    }
+                    "COLLATE" => {
+                        i += 1;
+                        false
+                    }
+                    _ => break,
+                };
+                if matches!(op.get(i), Some(Token::Eq)) {
+                    i += 1;
+                }
+                let value = match op.get(i) {
+                    Some(Token::Word(w)) => w.value.clone(),
+                    Some(Token::SingleQuotedString(s) | Token::DoubleQuotedString(s)) => s.clone(),
+                    _ => break,
+                };
+                i += 1;
+                if is_charset {
+                    charset = Some(value);
+                } else {
+                    collation = Some(value);
+                }
+            }
+            // Not (only) a charset / collation operation, or `CHARACTER SET DEFAULT`
+            let is_default = |v: Option<&str>| v.is_some_and(|v| v.eq_ignore_ascii_case("DEFAULT"));
+            if i != op.len()
+                || (charset.is_none() && collation.is_none())
+                || (convert && charset.is_none())
+                || is_default(charset.as_deref())
+                || is_default(collation.as_deref())
+            {
+                continue;
+            }
+            if charset.is_none() {
+                charset = collation.as_deref().and_then(charset_from_collation);
+            }
+            if convert {
+                for col in table.columns.values_mut() {
+                    if col.data_type.is_string() || matches!(col.data_type, SqlType::Enum(_)) {
+                        col.character_set.clone_from(&charset);
+                        col.collation.clone_from(&collation);
+                    }
+                }
+            }
+            table.character_set = charset;
+            table.collation = collation;
+        }
     }
 
     /// Re-parse a CREATE TABLE / CREATE VIEW statement without the clauses
@@ -1686,6 +1774,14 @@ fn build_column(
         }
     }
 
+    // MySQL national types are always utf8mb3, whatever the table's charset (NCHAR and
+    // NATIONAL VARCHAR parse as custom types, whose charset isn't tracked)
+    let national = dialect == SqlDialect::MySQL && matches!(data_type, DataType::Nvarchar(_));
+    let default_charset = if national {
+        Some("utf8mb3")
+    } else {
+        default_charset
+    };
     let is_text = col.data_type.is_string() || matches!(col.data_type, SqlType::Enum(_));
     if is_text && col.character_set.is_none() {
         if let Some(col_coll) = &col.collation {

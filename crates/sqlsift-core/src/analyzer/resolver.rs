@@ -972,6 +972,13 @@ impl<'a> Resolver<'a> {
                 {
                     l.ty = r.ty;
                 }
+                // Branches of different collations: MySQL picks another one for the
+                // result (the charset's _bin collation, or an error), not tracked
+                if let (Some(lc), Some(rc)) = (&l.collation, &r.collation) {
+                    if !lc.eq_ignore_ascii_case(rc) {
+                        l.collation = None;
+                    }
+                }
             }
         }
         Some(left)
@@ -2033,7 +2040,6 @@ impl<'a> Resolver<'a> {
                     self.in_aggregate_arg -= 1;
                 }
                 self.check_function_signature(func);
-                self.check_coalesce_collation(func);
                 // WITHIN GROUP (ORDER BY ...)
                 for ob in &func.within_group {
                     self.expr(&ob.expr);
@@ -2135,28 +2141,6 @@ impl<'a> Resolver<'a> {
                     .chain(else_result.as_deref())
                     .collect();
                 self.check_case_branches(&branches);
-                if self.dialect == SqlDialect::MySQL {
-                    'case_coll: for i in 0..branches.len() {
-                        for j in (i + 1)..branches.len() {
-                            if let (Some(c1), Some(c2)) = (
-                                self.column_collation(branches[i]),
-                                self.column_collation(branches[j]),
-                            ) {
-                                if !c1.eq_ignore_ascii_case(&c2) {
-                                    let span = located_span(branches[i])
-                                        .or_else(|| located_span(branches[j]));
-                                    self.check_collation_mix(
-                                        branches[i],
-                                        branches[j],
-                                        "CASE",
-                                        span,
-                                    );
-                                    break 'case_coll;
-                                }
-                            }
-                        }
-                    }
-                }
                 if self.case_enum_missing_labels && self.in_aggregate_arg == 0 {
                     self.check_case_enum_missing_labels(
                         expr,

@@ -97,21 +97,121 @@ fn test_in_list() {
 
 #[test]
 fn test_case_expression() {
-    assert_reports("SELECT CASE a.code WHEN b.code THEN 1 ELSE 0 END FROM a, b");
-    assert_reports("SELECT CASE WHEN a.id = 1 THEN a.code ELSE b.code END FROM a, b");
+    // `CASE x WHEN y` compares x with y
+    assert_reports("SELECT CASE a.code WHEN b.code THEN 1 ELSE 0 END FROM a JOIN b ON a.id = b.id");
+    // The result of branches of one charset falls back to the _bin collation
+    assert_clean(
+        "SELECT CASE WHEN a.id = 1 THEN a.code ELSE b.code END FROM a JOIN b ON a.id = b.id",
+    );
 }
 
 #[test]
-fn test_coalesce_and_ifnull() {
-    assert_reports("SELECT COALESCE(a.code, b.code) FROM a, b");
-    assert_reports("SELECT IFNULL(a.code, b.code) FROM a, b");
+fn test_coalesce_and_ifnull_are_clean() {
+    assert_clean("SELECT COALESCE(a.code, b.code) FROM a JOIN b ON a.id = b.id");
+    assert_clean("SELECT IFNULL(a.code, b.code) FROM a JOIN b ON a.id = b.id");
 }
 
 #[test]
-fn test_set_operations() {
-    assert_reports("SELECT a.code FROM a UNION SELECT b.code FROM b");
-    assert_reports("SELECT a.code FROM a INTERSECT SELECT b.code FROM b");
-    assert_reports("SELECT a.code FROM a EXCEPT SELECT b.code FROM b");
+fn test_set_operations_are_clean() {
+    assert_clean("SELECT a.code FROM a UNION SELECT b.code FROM b");
+    assert_clean("SELECT a.code FROM a INTERSECT SELECT b.code FROM b");
+    assert_clean("SELECT a.code FROM a EXCEPT SELECT b.code FROM b");
+    // The result's collation isn't known, so comparing it reports nothing
+    assert_clean(
+        "SELECT * FROM (SELECT a.code FROM a UNION SELECT b.code FROM b) u JOIN b ON u.code = b.code",
+    );
+}
+
+fn mysql_codes_with(schema: &str, sql: &str) -> Vec<&'static str> {
+    let mut builder = SchemaBuilder::with_dialect(SqlDialect::MySQL);
+    builder.parse(schema).expect("schema parses");
+    let catalog = builder.build().0;
+    Analyzer::with_dialect(&catalog, SqlDialect::MySQL)
+        .analyze(sql)
+        .iter()
+        .map(sqlsift_core::Diagnostic::code)
+        .collect()
+}
+
+const ALTER_SCHEMA: &str = "
+CREATE TABLE a (id INT, c VARCHAR(10)) DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+CREATE TABLE b (id INT, c VARCHAR(10)) DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
+";
+
+#[test]
+fn test_alter_table_convert_to_charset() {
+    const SQL: &str = "SELECT * FROM a JOIN b ON a.c = b.c";
+    assert_eq!(mysql_codes_with(ALTER_SCHEMA, SQL), vec!["E0036"]);
+
+    let converted = format!(
+        "{ALTER_SCHEMA}ALTER TABLE a CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;"
+    );
+    assert_eq!(mysql_codes_with(&converted, SQL), Vec::<&str>::new());
+    // Columns added afterwards take the new table default
+    let added = format!("{converted}\nALTER TABLE a ADD COLUMN d VARCHAR(10);");
+    assert_eq!(
+        mysql_codes_with(&added, "SELECT * FROM a JOIN b ON a.d = b.c"),
+        Vec::<&str>::new()
+    );
+
+    // Another collation of the same charset still differs
+    let other = format!(
+        "{ALTER_SCHEMA}ALTER TABLE b CONVERT TO CHARSET utf8mb4 COLLATE utf8mb4_general_ci;"
+    );
+    assert_eq!(mysql_codes_with(&other, SQL), vec!["E0036"]);
+
+    // Without COLLATE the collation is the charset's default (not known)
+    let no_collate = format!("{ALTER_SCHEMA}ALTER TABLE a CONVERT TO CHARACTER SET utf8mb4;");
+    assert_eq!(mysql_codes_with(&no_collate, SQL), Vec::<&str>::new());
+}
+
+#[test]
+fn test_alter_table_default_collate() {
+    // Existing columns keep their collation
+    let altered = format!("{ALTER_SCHEMA}ALTER TABLE a DEFAULT COLLATE utf8mb4_0900_ai_ci;");
+    assert_eq!(
+        mysql_codes_with(&altered, "SELECT * FROM a JOIN b ON a.c = b.c"),
+        vec!["E0036"]
+    );
+    // Columns added afterwards take the new default
+    for alter in [
+        "ALTER TABLE a DEFAULT COLLATE utf8mb4_0900_ai_ci;",
+        "ALTER TABLE a COLLATE = utf8mb4_0900_ai_ci;",
+        "ALTER TABLE a DEFAULT CHARACTER SET = utf8mb4 DEFAULT COLLATE = utf8mb4_0900_ai_ci;",
+    ] {
+        let schema = format!("{ALTER_SCHEMA}{alter}\nALTER TABLE a ADD COLUMN d VARCHAR(10);");
+        assert_eq!(
+            mysql_codes_with(&schema, "SELECT * FROM a JOIN b ON a.d = b.c"),
+            Vec::<&str>::new(),
+            "{alter}"
+        );
+    }
+    // Before the ALTER, an added column takes the old default
+    let schema = format!("{ALTER_SCHEMA}ALTER TABLE a ADD COLUMN d VARCHAR(10);");
+    assert_eq!(
+        mysql_codes_with(&schema, "SELECT * FROM a JOIN b ON a.d = b.c"),
+        vec!["E0036"]
+    );
+}
+
+#[test]
+fn test_nvarchar_is_utf8mb3() {
+    const SCHEMA: &str = "
+    CREATE TABLE n (id INT, c NVARCHAR(10)) DEFAULT CHARSET = latin1 COLLATE = latin1_general_ci;
+    CREATE TABLE l (id INT, c VARCHAR(10)) DEFAULT CHARSET = latin1 COLLATE = latin1_swedish_ci;
+    CREATE TABLE m (id INT, c NATIONAL VARCHAR(10)) DEFAULT CHARSET = latin1 COLLATE = latin1_general_ci;
+    CREATE TABLE k (id INT, c NCHAR(10)) DEFAULT CHARSET = latin1 COLLATE = latin1_general_ci;
+    ";
+    assert_eq!(
+        mysql_codes_with(SCHEMA, "SELECT * FROM n JOIN l ON n.c = l.c"),
+        Vec::<&str>::new()
+    );
+    for sql in [
+        "SELECT * FROM m JOIN l ON m.c = l.c",
+        "SELECT * FROM k JOIN l ON k.c = l.c",
+    ] {
+        assert!(!mysql_codes_with(SCHEMA, sql).contains(&"E0036"), "{sql}");
+    }
 }
 
 #[test]
