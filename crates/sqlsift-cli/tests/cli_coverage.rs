@@ -3300,7 +3300,53 @@ fn fixed_baseline_entries_with_verbose_shows_line_when_known() {
         .assert_stderr_contains(
             "Note: 1 baseline entry no longer occurs; re-run with --prune-baseline to remove it",
         )
-        .assert_stderr_contains("  q.sql:2 E0002");
+        .assert_stderr_contains("  q.sql:2 E0002 Column 'name' not found");
+}
+
+#[test]
+fn stale_entries_with_verbose_list_each_statement_line_and_message() {
+    let t = with_users_schema("bl-stale-repeat");
+    t.write(
+        "a.sql",
+        "SELECT nme FROM users;\n-- comment before\n\nSELECT foo FROM users;\nSELECT nme FROM users;\n",
+    );
+    write_baseline(&t, &["a.sql"]).assert_code(0);
+    t.write(
+        "schema.sql",
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, nme TEXT, foo TEXT);\n",
+    );
+    let args = [
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "sqlsift-baseline.json",
+        "a.sql",
+        "-v",
+    ];
+    let run = t.run(&args);
+    run.assert_code(0)
+        .assert_stderr_contains("Note: 3 baseline entries no longer occur");
+    let listed: Vec<_> = run
+        .stderr
+        .lines()
+        .filter(|line| line.starts_with("  a.sql"))
+        .collect();
+    assert_eq!(listed.len(), 3, "{}", run.stderr);
+    assert!(listed[0].starts_with("  a.sql:1 E0002 "), "{}", run.stderr);
+    assert!(listed[0].contains("nme"), "{}", run.stderr);
+    assert!(listed[1].starts_with("  a.sql:4 E0002 "), "{}", run.stderr);
+    assert!(listed[1].contains("foo"), "{}", run.stderr);
+    assert!(listed[2].starts_with("  a.sql:5 E0002 "), "{}", run.stderr);
+    assert!(listed[2].contains("nme"), "{}", run.stderr);
+
+    // --strict-baseline lists them the same way
+    let mut strict = args.to_vec();
+    strict.push("--strict-baseline");
+    t.run(&strict)
+        .assert_code(1)
+        .assert_stderr_contains("Error: 3 baseline entries no longer occur")
+        .assert_stderr_contains(listed[1]);
 }
 
 #[test]

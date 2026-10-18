@@ -388,17 +388,6 @@ impl BaselineFilter {
             }
         }
 
-        let ranges = statement_ranges(sql);
-        let lines = line_starts(sql);
-        let mut statement_lines: HashMap<String, usize> = HashMap::new();
-        for range in ranges {
-            let hash = hash_version(self.version, &sql[range.clone()]);
-            let trimmed_offset =
-                range.start + (sql[range.clone()].len() - sql[range.clone()].trim_start().len());
-            let line = lines.partition_point(|&offset| offset <= trimmed_offset);
-            statement_lines.entry(hash).or_insert(line);
-        }
-
         let mut filtered = Filtered::default();
         for (diagnostic, matched) in diagnostics.into_iter().zip(matched) {
             if matched {
@@ -407,19 +396,41 @@ impl BaselineFilter {
                 filtered.kept.push(diagnostic);
             }
         }
-        filtered.stale = entries
-            .iter()
-            .zip(used)
-            .filter(|(_, used)| !used)
-            .map(|(entry, _)| {
+        if used.contains(&false) {
+            filtered.stale = self.stale_with_lines(entries, &used, sql);
+        }
+        filtered
+    }
+
+    /// The `entries` not `used`, with the line of their statement in `sql` when
+    /// it is still there. The n-th entry of a code, message and statement hash
+    /// gets the line of the n-th statement with that hash (or the last one).
+    fn stale_with_lines(
+        &self,
+        entries: &[BaselineEntry],
+        used: &[bool],
+        sql: &str,
+    ) -> Vec<BaselineEntry> {
+        let lines = statement_lines(self.version, sql);
+        let mut seen: HashMap<(&str, &str, &str), usize> = HashMap::new();
+        let mut stale = Vec::new();
+        for (entry, &used) in entries.iter().zip(used) {
+            let n = seen
+                .entry((&entry.code, &entry.message, &entry.statement_hash))
+                .or_default();
+            if !used {
                 let mut entry = entry.clone();
                 if entry.line.is_none() {
-                    entry.line = statement_lines.get(&entry.statement_hash).copied();
+                    entry.line = lines
+                        .get(&entry.statement_hash)
+                        .and_then(|lines| lines.get(*n).or(lines.last()))
+                        .copied();
                 }
-                entry
-            })
-            .collect();
-        filtered
+                stale.push(entry);
+            }
+            *n += 1;
+        }
+        stale
     }
 
     /// The entries of the files not in `checked` ([`file_key`]s) that are
@@ -774,6 +785,26 @@ fn statement_ranges(source: &str) -> Vec<Range<usize>> {
         ranges.push(start..source.len());
     }
     ranges
+}
+
+/// Lines (1-indexed) where the statements of `sql` start, after whitespace and
+/// comments, by statement hash (of baseline format `version`), in order
+fn statement_lines(version: u32, sql: &str) -> HashMap<String, Vec<usize>> {
+    let starts = line_starts(sql);
+    let mut lines: HashMap<String, Vec<usize>> = HashMap::new();
+    for range in statement_ranges(sql) {
+        let statement = &sql[range.clone()];
+        let start = tokens(statement)
+            .into_iter()
+            .find(|token| !matches!(token.kind, TokenKind::Whitespace | TokenKind::Comment))
+            .map_or(0, |token| token.range.start);
+        let line = starts.partition_point(|&offset| offset <= range.start + start);
+        lines
+            .entry(hash_version(version, statement))
+            .or_default()
+            .push(line);
+    }
+    lines
 }
 
 /// The range containing `offset` (an offset past the end belongs to the last)
@@ -1426,5 +1457,81 @@ mod tests {
         let filtered = filter.filter("q.sql", sql, vec![]);
         assert_eq!(filtered.stale.len(), 1);
         assert_eq!(filtered.stale[0].line, Some(2));
+    }
+
+    #[test]
+    fn stale_entries_of_repeated_statements_get_their_own_lines() {
+        let sql = "SELECT nme FROM users;\n-- comment before\n\nSELECT foo FROM users;\nSELECT nme FROM users;\n";
+        let mut baseline = Baseline::default();
+        baseline.add_file(
+            "a.sql",
+            sql,
+            &[
+                diag_msg(
+                    DiagnosticKind::ColumnNotFound,
+                    1,
+                    8,
+                    "Column 'nme' not found",
+                ),
+                diag_msg(
+                    DiagnosticKind::ColumnNotFound,
+                    4,
+                    8,
+                    "Column 'foo' not found",
+                ),
+                diag_msg(
+                    DiagnosticKind::ColumnNotFound,
+                    5,
+                    8,
+                    "Column 'nme' not found",
+                ),
+            ],
+        );
+        let filter = BaselineFilter::new(&baseline);
+        let filtered = filter.filter("a.sql", sql, vec![]);
+        let lines: Vec<_> = filtered
+            .stale
+            .iter()
+            .map(|entry| (entry.line, entry.message.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (Some(1), "Column 'nme' not found"),
+                (Some(4), "Column 'foo' not found"),
+                (Some(5), "Column 'nme' not found"),
+            ]
+        );
+    }
+
+    #[test]
+    fn stale_entry_line_skips_leading_comments() {
+        let sql = "SELECT id FROM users;\n/* block\n comment */\n-- line comment\nSELECT foo FROM users;\n";
+        let mut baseline = Baseline::default();
+        baseline.add_file("a.sql", sql, &[diag(DiagnosticKind::ColumnNotFound, 5, 8)]);
+        let filter = BaselineFilter::new(&baseline);
+        let filtered = filter.filter("a.sql", sql, vec![]);
+        assert_eq!(filtered.stale.len(), 1);
+        assert_eq!(filtered.stale[0].line, Some(5));
+    }
+
+    #[test]
+    fn stale_entries_of_one_statement_share_its_line() {
+        let sql = "-- first\nSELECT a, b FROM t;";
+        let lines = statement_lines(BASELINE_VERSION, sql);
+        assert_eq!(lines.into_values().collect::<Vec<_>>(), [[2]]);
+
+        let mut baseline = Baseline::default();
+        let diagnostics = [
+            diag_msg(DiagnosticKind::ColumnNotFound, 2, 8, "a"),
+            diag_msg(DiagnosticKind::ColumnNotFound, 2, 11, "b"),
+        ];
+        baseline.add_file("q.sql", sql, &diagnostics);
+        let filter = BaselineFilter::new(&baseline);
+        let filtered = filter.filter("q.sql", sql, vec![]);
+        let lines: Vec<_> = filtered.stale.iter().map(|entry| entry.line).collect();
+        assert_eq!(lines, [Some(2), Some(2)]);
+        let filtered = filter.filter("q.sql", sql, diagnostics.to_vec());
+        assert!(filtered.stale.is_empty());
     }
 }

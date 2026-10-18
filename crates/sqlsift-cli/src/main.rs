@@ -266,6 +266,17 @@ fn entries_word(n: usize) -> &'static str {
     }
 }
 
+/// Print stale baseline entries to stderr, one per line (`-v`)
+fn print_stale_entries(entries: &[baseline::BaselineEntry]) {
+    for entry in entries {
+        if let Some(line) = entry.line {
+            eprintln!("  {}:{line} {} {}", entry.file, entry.code, entry.message);
+        } else {
+            eprintln!("  {} {} {}", entry.file, entry.code, entry.message);
+        }
+    }
+}
+
 /// Print the rule registry as a table or JSON
 fn print_rules(format: crate::args::RulesFormat) {
     use sqlsift_core::rules::RULES;
@@ -1254,13 +1265,7 @@ fn run(args: Args) -> Result<bool> {
                         if stale == 1 { "it" } else { "them" },
                     );
                     if verbose >= 1 {
-                        for entry in &stale_entries {
-                            if let Some(line) = entry.line {
-                                eprintln!("  {}:{line} {}", entry.file, entry.code);
-                            } else {
-                                eprintln!("  {} {}", entry.file, entry.code);
-                            }
-                        }
+                        print_stale_entries(&stale_entries);
                     }
                 }
             }
@@ -1276,13 +1281,7 @@ fn run(args: Args) -> Result<bool> {
                     if stale == 1 { "it" } else { "them" },
                 );
                 if verbose >= 1 {
-                    for entry in &stale_entries {
-                        if let Some(line) = entry.line {
-                            eprintln!("  {}:{line} {}", entry.file, entry.code);
-                        } else {
-                            eprintln!("  {} {}", entry.file, entry.code);
-                        }
-                    }
+                    print_stale_entries(&stale_entries);
                 }
             }
             let too_many_entries = max_baseline_entries
