@@ -1377,3 +1377,127 @@ fn code_action_omits_line_fix_inside_multiline_string() {
     assert_eq!(actions.len(), 1, "{actions:#?}");
     assert_eq!(actions[0]["title"], "Disable E0002 for this file");
 }
+
+fn sqlsift_diagnostic(line: u32, start: u32, end: u32) -> Value {
+    json!({
+        "range": {
+            "start": {"line": line, "character": start},
+            "end": {"line": line, "character": end}
+        },
+        "source": "sqlsift",
+        "code": "E0002",
+        "message": "column not found"
+    })
+}
+
+#[test]
+fn code_actions_are_deduplicated_by_code_and_line() {
+    let t = workspace("dedupe-code-action", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("q.sql");
+    let content = "SELECT nme, nme FROM users;\nSELECT nme FROM users;\n";
+    lsp.open(&uri, content);
+    let diags = [
+        sqlsift_diagnostic(0, 7, 10),
+        sqlsift_diagnostic(0, 12, 15),
+        sqlsift_diagnostic(1, 7, 10),
+    ];
+
+    let resp = lsp.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {"uri": uri},
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}},
+            "context": {"diagnostics": diags}
+        }),
+    );
+    let actions = resp["result"].as_array().expect("array of code actions");
+    let titles: Vec<&str> = actions
+        .iter()
+        .map(|a| a["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            "Disable E0002 for this line",
+            "Disable E0002 for this file",
+            "Disable E0002 for this line",
+        ],
+        "{actions:#?}"
+    );
+    assert_eq!(
+        actions[2]["edit"]["changes"][&uri][0]["range"]["start"]["line"],
+        1
+    );
+}
+
+#[test]
+fn code_action_indent_copies_only_spaces_and_tabs() {
+    let t = workspace("indent-code-action", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("q.sql");
+    lsp.open(&uri, "SELECT\n \t\u{3000}nme FROM users;\n");
+    let d = sqlsift_diagnostic(1, 3, 6);
+
+    let resp = lsp.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {"uri": uri},
+            "range": d["range"],
+            "context": {"diagnostics": [d]}
+        }),
+    );
+    let actions = resp["result"].as_array().expect("array of code actions");
+    assert_eq!(actions[0]["title"], "Disable E0002 for this line");
+    assert_eq!(
+        actions[0]["edit"]["changes"][&uri][0]["newText"],
+        " \t-- sqlsift:disable E0002\n"
+    );
+}
+
+#[test]
+fn code_action_omits_line_fix_when_backslash_does_not_escape() {
+    let t = workspace("pg-backslash-code-action", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("q.sql");
+    lsp.open(&uri, "SELECT 'C:\\', 'x\\n\nnme', nme FROM users;\n");
+    let d = sqlsift_diagnostic(1, 6, 9);
+
+    let resp = lsp.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {"uri": uri},
+            "range": d["range"],
+            "context": {"diagnostics": [d]}
+        }),
+    );
+    let actions = resp["result"].as_array().expect("array of code actions");
+    // Line 1 starts inside 'x\n...', so only the file fix is offered
+    assert_eq!(actions.len(), 1, "{actions:#?}");
+    assert_eq!(actions[0]["title"], "Disable E0002 for this file");
+}
+
+#[test]
+fn code_action_omits_line_fix_inside_mysql_double_quoted_string() {
+    let t = workspace("mysql-dq-code-action", "dialect = \"mysql\"\n");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("q.sql");
+    lsp.open(&uri, "SELECT \"a\nb\", nme FROM users;\n");
+    let d = sqlsift_diagnostic(1, 4, 7);
+
+    let resp = lsp.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {"uri": uri},
+            "range": d["range"],
+            "context": {"diagnostics": [d]}
+        }),
+    );
+    let actions = resp["result"].as_array().expect("array of code actions");
+    assert_eq!(actions.len(), 1, "{actions:#?}");
+    assert_eq!(actions[0]["title"], "Disable E0002 for this file");
+}
