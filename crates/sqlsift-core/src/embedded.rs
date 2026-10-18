@@ -572,8 +572,17 @@ pub(crate) fn directive(text: &[char], start: usize, end: Option<usize>) -> Opti
         .iter()
         .take_while(|c| c.is_whitespace() || **c == '*' || **c == '/')
         .count();
-    let prefix: Vec<char> = "sqlsift:".chars().collect();
+    // `sqlsift:`, `sqlsift :` (as in SQL comments)
+    let prefix: Vec<char> = "sqlsift".chars().collect();
     if !text[leading..].starts_with(&prefix) {
+        return None;
+    }
+    let after = &text[leading + prefix.len()..];
+    let spaces = after
+        .iter()
+        .take_while(|c| **c == ' ' || **c == '\t')
+        .count();
+    if after.get(spaces) != Some(&':') {
         return None;
     }
     let mut directive: Vec<char> = text[leading..].to_vec();
@@ -1240,6 +1249,11 @@ mod tests {
                 "// sqlsift:disable-file\n/* sqlsift:disable E0002 */\n//sqlsift:disable\n// other"
             ),
             "-- sqlsift:disable-file\n-- sqlsift:disable E0002   \n--sqlsift:disable\n        "
+        );
+        // A space before the colon, as in SQL comments
+        assert_eq!(
+            sql("// sqlsift : disable E0002\n/* sqlsift :disable-file */\n// sqlsifty: no"),
+            "-- sqlsift : disable E0002\n-- sqlsift :disable-file   \n               "
         );
         // Not when the `--` would hide SQL after the comment
         assert_eq!(

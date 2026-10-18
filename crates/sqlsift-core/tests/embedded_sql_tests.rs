@@ -343,6 +343,11 @@ fn directives_in_code_comments() {
     );
     let inline = "sql`SELECT nme FROM authors`; // sqlsift:disable column-not-found";
     assert!(analyze_ts(inline, &["sql"]).is_empty());
+    // A space before the colon, as in SQL comments
+    let spaced = "sql`SELECT nme FROM authors`; // sqlsift : disable E0002";
+    assert!(analyze_ts(spaced, &["sql"]).is_empty());
+    let spaced = "/* sqlsift : disable-file */\nsql`SELECT nme FROM authors`;";
+    assert!(analyze_ts(spaced, &["sql"]).is_empty());
 }
 
 #[test]

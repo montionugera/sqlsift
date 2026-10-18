@@ -524,6 +524,44 @@ fn misspelled_rule_in_disable_comment_is_explained() {
 }
 
 #[test]
+fn ordinary_sqlsift_comments_are_not_misspelled_directives() {
+    let c = pg(POSTS);
+    let body = Some("Did you mean 'body'?");
+    for comment in [
+        "-- sqlsift: table users is legacy",
+        "-- sqlsift: stable output",
+        "-- sqlsift: usable as is",
+        "-- sqlsift: visible to admins",
+        "-- sqlsift: enable later",
+        "-- sqlsift: d",
+    ] {
+        let d = single_pg(&c, &format!("{comment}\nSELECT bdy FROM posts"));
+        assert_eq!(d.help.as_deref(), body, "{comment}");
+        let d = single_pg(&c, &format!("SELECT bdy FROM posts {comment}"));
+        assert_eq!(d.help.as_deref(), body, "{comment}");
+    }
+
+    // Misspellings of the directive names still get a suggestion
+    let d = single_pg(&c, "-- sqlsift: disabled E0002\nSELECT bdy FROM posts");
+    assert_eq!(
+        d.help.as_deref(),
+        Some(
+            "Did you mean 'body'?\n\
+             'sqlsift:disabled' is not a sqlsift directive. Did you mean 'sqlsift:disable'?"
+        )
+    );
+    let d = single_pg(&c, "-- sqlsift: disable_file\nSELECT bdy FROM posts");
+    assert_eq!(
+        d.help.as_deref(),
+        Some(
+            "Did you mean 'body'?\n\
+             'sqlsift:disable_file' is not a sqlsift directive. \
+             Did you mean 'sqlsift:disable-file'?"
+        )
+    );
+}
+
+#[test]
 fn swapped_adjacent_characters_are_suggested() {
     let c = pg("CREATE TABLE events (id int, kind text, day date);");
     let d = single_pg(&c, "SELECT kidn FROM events");

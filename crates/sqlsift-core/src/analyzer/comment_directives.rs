@@ -110,7 +110,7 @@ impl InlineDirectives {
                     merge_into_map(&mut disabled_lines, line_num, codes);
                 }
             } else if let Some(malformed) = parse_malformed_directive(line) {
-                if similar_directive_name(&malformed).as_deref() == Some("sqlsift:disable-file") {
+                if similar_directive_name(&malformed) == Some("sqlsift:disable-file") {
                     malformed_file.push(malformed);
                 } else if trimmed.starts_with("--") {
                     pending_malformed.push(malformed);
@@ -215,15 +215,27 @@ impl InlineDirectives {
     }
 }
 
-/// Find a similar directive name for suggestions
-fn similar_directive_name(name: &str) -> Option<String> {
-    crate::suggest::find_similar_name(
-        [
-            "sqlsift:disable".to_string(),
-            "sqlsift:disable-file".to_string(),
-        ],
-        name,
-    )
+/// Shortest word after `sqlsift:` that may be a misspelled directive name
+const MIN_DIRECTIVE_WORD_LEN: usize = 5;
+
+/// The directive that the misspelled directive `name` (`sqlsift:<word>`) most likely
+/// means. Only the word after the colon is compared, with one edit allowed for
+/// `disable` and two for `disable-file`, so that ordinary words in a `sqlsift:` comment
+/// (`table`, `usable`, `visible`, `enable`) are not mistaken for directives.
+fn similar_directive_name(name: &str) -> Option<&'static str> {
+    let word = name.strip_prefix("sqlsift:")?.to_lowercase();
+    if word.chars().count() < MIN_DIRECTIVE_WORD_LEN {
+        return None;
+    }
+    // (directive, edits allowed in the word after the colon)
+    [("sqlsift:disable", 1), ("sqlsift:disable-file", 2)]
+        .into_iter()
+        .filter_map(|(directive, max)| {
+            let distance = crate::suggest::edit_distance(&word, &directive["sqlsift:".len()..]);
+            (distance <= max).then_some((distance, directive))
+        })
+        .min_by_key(|&(distance, _)| distance)
+        .map(|(_, directive)| directive)
 }
 
 /// Parse a `-- sqlsift:disable ...` or `-- sqlsift:disable-file ...` directive from a line.
@@ -386,6 +398,31 @@ mod tests {
         let sql = "-- sqlsift: this query is slow\n-- sqlsift: TODO\nSELECT 1";
         let directives = InlineDirectives::parse(sql);
         assert_eq!(directives.malformed_directive_help(3), None);
+    }
+
+    #[test]
+    fn test_only_the_word_after_the_colon_is_compared() {
+        for word in ["d", "table", "stable", "usable", "visible", "enable"] {
+            assert_eq!(
+                similar_directive_name(&format!("sqlsift:{word}")),
+                None,
+                "{word}"
+            );
+        }
+        for (word, expected) in [
+            ("disabel", "sqlsift:disable"),
+            ("disabled", "sqlsift:disable"),
+            ("Disable", "sqlsift:disable"),
+            ("disable_file", "sqlsift:disable-file"),
+            ("disable-fiel", "sqlsift:disable-file"),
+            ("disabel_file", "sqlsift:disable-file"),
+        ] {
+            assert_eq!(
+                similar_directive_name(&format!("sqlsift:{word}")),
+                Some(expected),
+                "{word}"
+            );
+        }
     }
 
     #[test]
