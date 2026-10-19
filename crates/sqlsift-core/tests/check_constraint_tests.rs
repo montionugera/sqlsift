@@ -477,3 +477,79 @@ fn sqlite_skips_non_integer_arithmetic_in_check() {
         Vec::<&str>::new()
     );
 }
+
+#[test]
+fn drop_constraint_fallback_and_partition_parent_drop() {
+    // Collision in schema: t_x_check1
+    let schema_collision = "
+    CREATE TABLE a (x INT CONSTRAINT t_x_check CHECK (x > 0));
+    CREATE TABLE t (x INT CHECK (x > 0));
+    ALTER TABLE t DROP CONSTRAINT t_x_check1;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            schema_collision,
+            "INSERT INTO t (x) VALUES (-1)"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // LIKE ... INCLUDING CONSTRAINTS keeps source table's name (p_x_check)
+    let like_schema = "
+    CREATE TABLE p (x INT CHECK (x > 0));
+    CREATE TABLE t (LIKE p INCLUDING CONSTRAINTS);
+    ALTER TABLE t DROP CONSTRAINT p_x_check;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            like_schema,
+            "INSERT INTO t (x) VALUES (-1)"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // Column-level CHECK referencing two columns is named t_check
+    let multi_col_inline = "
+    CREATE TABLE t (x INT, y INT CHECK (x < y));
+    ALTER TABLE t DROP CONSTRAINT t_check;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            multi_col_inline,
+            "INSERT INTO t (x, y) VALUES (10, 5)"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // Dropping a check on a partitioned parent also drops it from the partitions
+    let partition_schema = "
+    CREATE TABLE p (x INT CHECK (x > 0)) PARTITION BY RANGE (x);
+    CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (-10) TO (10);
+    ALTER TABLE p DROP CONSTRAINT p_x_check;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            partition_schema,
+            "INSERT INTO p1 (x) VALUES (-1)"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // Collation set later with ALTER TABLE t ALTER COLUMN c TYPE text COLLATE ci
+    let alter_collate_schema = "
+    CREATE TABLE t (c TEXT CHECK (c IN ('a', 'b')));
+    ALTER TABLE t ALTER COLUMN c TYPE TEXT COLLATE ci;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            alter_collate_schema,
+            "INSERT INTO t (c) VALUES ('A')"
+        ),
+        Vec::<&str>::new()
+    );
+}

@@ -672,6 +672,7 @@ impl SchemaBuilder {
         table
             .check_constraints
             .clone_from(&parent_table.check_constraints);
+        table.partition_of = Some(parent);
         self.catalog.add_table(table);
         true
     }
@@ -1099,6 +1100,7 @@ impl SchemaBuilder {
         table
             .check_constraints
             .clone_from(&parent_table.check_constraints);
+        table.partition_of = Some(parent_name);
         self.catalog.add_table(table);
     }
 
@@ -1317,15 +1319,19 @@ impl SchemaBuilder {
                 }
                 AlterTableOperation::DropColumn { column_names, .. } => {
                     let dialect = self.dialect;
+                    let targets = self.catalog.table_and_partitions(&table_name);
                     for column_name in column_names {
                         let location = self.location(column_name.span);
-                        if let Some(table) = self.catalog.get_table_mut(&table_name) {
-                            if let Some(index) = column_index(table, &column_name.value) {
-                                if let Some((name, _)) = table.columns.shift_remove_index(index) {
-                                    table
-                                        .check_constraints
-                                        .retain(|c| !check_references_column(c, &name, dialect));
-                                    table.record_column_drop(&name, location);
+                        for target in &targets {
+                            if let Some(table) = self.catalog.get_table_mut(target) {
+                                if let Some(index) = column_index(table, &column_name.value) {
+                                    if let Some((name, _)) = table.columns.shift_remove_index(index)
+                                    {
+                                        table.check_constraints.retain(|c| {
+                                            !check_references_column(c, &name, dialect)
+                                        });
+                                        table.record_column_drop(&name, location.clone());
+                                    }
                                 }
                             }
                         }
@@ -1349,10 +1355,13 @@ impl SchemaBuilder {
                     }
                 }
                 AlterTableOperation::AlterColumn { column_name, op } => {
-                    if let Some(col) = self.catalog.get_table_mut(&table_name).and_then(|t| {
-                        column_index(t, &column_name.value).map(|i| &mut t.columns[i])
-                    }) {
-                        apply_alter_column(col, op, self.dialect);
+                    let dialect = self.dialect;
+                    for target in self.catalog.table_and_partitions(&table_name) {
+                        if let Some(col) = self.catalog.get_table_mut(&target).and_then(|t| {
+                            column_index(t, &column_name.value).map(|i| &mut t.columns[i])
+                        }) {
+                            apply_alter_column(col, op, dialect);
+                        }
                     }
                 }
                 AlterTableOperation::ModifyColumn {
@@ -1420,29 +1429,40 @@ impl SchemaBuilder {
                     let mut constraints = TableDef::new(table_name.clone());
                     self.process_table_constraint(&mut constraints, constraint);
                     let dialect = self.dialect;
-                    if let Some(table) = self.catalog.get_table_mut(&table_name) {
-                        if let Some(pk) = &constraints.primary_key {
-                            for col_name in &pk.columns {
-                                if let Some(index) = column_index(table, col_name) {
-                                    let col = &mut table.columns[index];
-                                    col.is_primary_key = true;
-                                    col.nullable = false;
+                    for target in self.catalog.table_and_partitions(&table_name) {
+                        if let Some(table) = self.catalog.get_table_mut(&target) {
+                            if let Some(pk) = &constraints.primary_key {
+                                for col_name in &pk.columns {
+                                    if let Some(index) = column_index(table, col_name) {
+                                        let col = &mut table.columns[index];
+                                        col.is_primary_key = true;
+                                        col.nullable = false;
+                                    }
                                 }
                             }
+                            merge_constraints(table, constraints.clone(), dialect);
                         }
-                        merge_constraints(table, constraints, dialect);
                     }
                 }
                 AlterTableOperation::RenameConstraint { old_name, new_name } => {
                     let dialect = self.dialect;
-                    if let Some(table) = self.catalog.get_table_mut(&table_name) {
-                        rename_table_constraint(table, &old_name.value, &new_name.value, dialect);
+                    for target in self.catalog.table_and_partitions(&table_name) {
+                        if let Some(table) = self.catalog.get_table_mut(&target) {
+                            rename_table_constraint(
+                                table,
+                                &old_name.value,
+                                &new_name.value,
+                                dialect,
+                            );
+                        }
                     }
                 }
                 AlterTableOperation::DropConstraint { name, .. } => {
                     let dialect = self.dialect;
-                    if let Some(table) = self.catalog.get_table_mut(&table_name) {
-                        drop_table_constraint(table, &name.value, dialect);
+                    for target in self.catalog.table_and_partitions(&table_name) {
+                        if let Some(table) = self.catalog.get_table_mut(&target) {
+                            drop_table_constraint(table, &name.value, dialect);
+                        }
                     }
                 }
                 _ => {
@@ -1776,7 +1796,7 @@ fn copy_check_constraints(
     dialect: SqlDialect,
 ) {
     for mut check in checks {
-        if check.name.is_none() {
+        if check.name.is_none() && check.generated_name.is_none() {
             check.generated_name = generated_check_name(
                 dialect,
                 &table.name.name,
@@ -1792,7 +1812,7 @@ fn copy_check_constraints(
 fn generated_check_name(
     dialect: SqlDialect,
     table_name: &str,
-    col_name: Option<&str>,
+    _col_name: Option<&str>,
     expression: &str,
     existing: &[CheckConstraintDef],
 ) -> Option<String> {
@@ -1807,41 +1827,23 @@ fn generated_check_name(
         })
     };
     if dialect == SqlDialect::MySQL {
-        for i in 1.. {
-            let candidate = format!("{table_name}_chk_{i}");
-            if !is_taken(&candidate) {
-                return Some(candidate);
-            }
-        }
-        None
+        let candidate = format!("{table_name}_chk_1");
+        (!is_taken(&candidate)).then_some(candidate)
     } else if dialect.is_psql() {
-        let inferred_col = if col_name.is_none() {
-            Parser::new(dialect.parser_dialect().as_ref())
-                .try_with_sql(expression)
-                .and_then(|mut p| p.parse_expr())
-                .ok()
-                .and_then(|expr| {
-                    let mut cols = std::collections::HashSet::new();
-                    analyzer::ranges::collect_referenced_columns(&expr, &mut cols);
-                    (cols.len() == 1).then(|| cols.into_iter().next()).flatten()
-                })
-        } else {
-            None
-        };
-        let base = match col_name.or(inferred_col.as_deref()) {
+        let inferred_col = Parser::new(dialect.parser_dialect().as_ref())
+            .try_with_sql(expression)
+            .and_then(|mut p| p.parse_expr())
+            .ok()
+            .and_then(|expr| {
+                let mut cols = std::collections::HashSet::new();
+                analyzer::ranges::collect_referenced_columns(&expr, &mut cols);
+                (cols.len() == 1).then(|| cols.into_iter().next()).flatten()
+            });
+        let base = match inferred_col.as_deref() {
             Some(col) => format!("{table_name}_{col}_check"),
             None => format!("{table_name}_check"),
         };
-        if !is_taken(&base) {
-            return Some(base);
-        }
-        for i in 1.. {
-            let candidate = format!("{base}{i}");
-            if !is_taken(&candidate) {
-                return Some(candidate);
-            }
-        }
-        None
+        (!is_taken(&base)).then_some(base)
     } else {
         None
     }
@@ -1941,33 +1943,29 @@ fn rename_table_constraint(
     }
 }
 
-fn drop_table_constraint(table: &mut TableDef, target: &str, dialect: SqlDialect) {
-    let before = table.check_constraints.len();
+fn drop_table_constraint(table: &mut TableDef, target: &str, _dialect: SqlDialect) {
+    let before_checks = table.check_constraints.len();
     table
         .check_constraints
         .retain(|c| !check_matches_name(c, target));
-    if table.check_constraints.len() == before
-        && dialect.is_psql()
-        && target.eq_ignore_ascii_case(&format!("{}_check", table.name.name))
-    {
-        if let Some(pos) = table
-            .check_constraints
-            .iter()
-            .position(|c| c.name.is_none() && c.column.is_none())
-        {
-            table.check_constraints.remove(pos);
-        }
-    }
+    let mut matched = table.check_constraints.len() < before_checks;
+
+    let before_unique = table.unique_constraints.len();
     table.unique_constraints.retain(|u| {
         !u.name
             .as_deref()
             .is_some_and(|n| n.eq_ignore_ascii_case(target))
     });
+    matched |= table.unique_constraints.len() < before_unique;
+
+    let before_fk = table.foreign_keys.len();
     table.foreign_keys.retain(|fk| {
         !fk.name
             .as_deref()
             .is_some_and(|n| n.eq_ignore_ascii_case(target))
     });
+    matched |= table.foreign_keys.len() < before_fk;
+
     if table
         .primary_key
         .as_ref()
@@ -1975,6 +1973,15 @@ fn drop_table_constraint(table: &mut TableDef, target: &str, dialect: SqlDialect
         .is_some_and(|n| n.eq_ignore_ascii_case(target))
     {
         table.primary_key = None;
+        matched = true;
+    }
+
+    // When a DROP CONSTRAINT / DROP CHECK name matches nothing, fall back to
+    // dropping every unnamed CHECK of the table so dialect naming corners
+    // (63-byte truncation, schema-wide suffix collisions, LIKE source names,
+    // or MySQL numbering) never cause false positives.
+    if !matched {
+        table.check_constraints.retain(|c| c.name.is_some());
     }
 }
 
@@ -1985,8 +1992,16 @@ fn apply_alter_column(col: &mut ColumnDef, op: &AlterColumnOperation, dialect: S
         AlterColumnOperation::DropNotNull => col.nullable = true,
         AlterColumnOperation::SetDefault { value } => col.default = Some(expr_to_default(value)),
         AlterColumnOperation::DropDefault => col.default = None,
-        AlterColumnOperation::SetDataType { data_type, .. } => {
+        AlterColumnOperation::SetDataType {
+            data_type, using, ..
+        } => {
             col.data_type = SqlType::from_ast_in(data_type, dialect);
+            if using
+                .as_ref()
+                .is_some_and(|u| u.to_string().contains("__sqlsift_collate"))
+            {
+                col.collated = true;
+            }
         }
         AlterColumnOperation::AddGenerated { generated_as, .. } => {
             use sqlparser::ast::GeneratedAs;
@@ -2268,7 +2283,18 @@ fn mask_table_elements(
     };
     let is = |n: usize, t: &Token| token(n) == Some(t);
     if word(0) == "ALTER" && word(1) == "TABLE" {
+        let mut in_alter_column_type = false;
+        let mut paren_depth = 0usize;
         for n in 2..significant.len() {
+            match token(n) {
+                Some(Token::LParen) => paren_depth += 1,
+                Some(Token::RParen) => paren_depth = paren_depth.saturating_sub(1),
+                Some(Token::Comma) if paren_depth == 0 => in_alter_column_type = false,
+                _ => {}
+            }
+            if paren_depth == 0 && word(n) == "TYPE" {
+                in_alter_column_type = true;
+            }
             if mysql && word(n) == "DROP" && word(n + 1) == "CHECK" {
                 if let Some(start) = offset(&tokens[significant[n + 1]]) {
                     edits.push(super::warehouse::Edit {
@@ -2297,6 +2323,40 @@ fn mask_table_elements(
                     });
                     drop[significant[n + 3]] = true;
                     drop[significant[n + 4]] = true;
+                }
+            } else if dialect.is_psql() && in_alter_column_type && word(n) == "COLLATE" {
+                let rest_tokens: Vec<&Token> = significant[n + 1..]
+                    .iter()
+                    .map(|&i| &tokens[i].token)
+                    .collect();
+                let coll_len = object_name_len(&rest_tokens).max(usize::from(matches!(
+                    token(n + 1),
+                    Some(Token::SingleQuotedString(_))
+                )));
+                if coll_len > 0 {
+                    let last_coll = n + coll_len;
+                    if word(last_coll + 1) == "USING" {
+                        for &i in &significant[n..=last_coll] {
+                            drop[i] = true;
+                        }
+                        if let Some(using_start) = offset(&tokens[significant[last_coll + 1]]) {
+                            edits.push(super::warehouse::Edit {
+                                range: using_start..using_start + "USING".len(),
+                                text: "USING __sqlsift_collate = ",
+                            });
+                        }
+                    } else {
+                        for &i in &significant[n + 1..=last_coll] {
+                            drop[i] = true;
+                        }
+                        if let Some(collate_start) = offset(&tokens[significant[n]]) {
+                            edits.push(super::warehouse::Edit {
+                                range: collate_start..collate_start + "COLLATE".len(),
+                                text: "USING __sqlsift_collate",
+                            });
+                        }
+                    }
+                    in_alter_column_type = false;
                 }
             }
         }
