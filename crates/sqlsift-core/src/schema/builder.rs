@@ -1788,7 +1788,7 @@ fn build_column(
             col.character_set = charset_from_collation(col_coll);
         } else {
             col.character_set = default_charset.map(ToString::to_string);
-            if col.collation.is_none() {
+            if !national && col.collation.is_none() {
                 if let Some(tbl_coll) = default_collation {
                     if collation_matches_charset(tbl_coll, col.character_set.as_deref()) {
                         col.collation = Some(tbl_coll.to_string());
