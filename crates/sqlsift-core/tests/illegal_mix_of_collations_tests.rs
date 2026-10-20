@@ -202,6 +202,11 @@ fn test_nvarchar_is_utf8mb3() {
     CREATE TABLE m (id INT, c NATIONAL VARCHAR(10)) DEFAULT CHARSET = latin1 COLLATE = latin1_general_ci;
     CREATE TABLE k (id INT, c NCHAR(10)) DEFAULT CHARSET = latin1 COLLATE = latin1_general_ci;
     ";
+    const UTF8MB3_SCHEMA: &str = "
+    CREATE TABLE a (c NVARCHAR(10)) DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci;
+    CREATE TABLE b (c VARCHAR(10) CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci);
+    ";
+
     assert_eq!(
         mysql_codes_with(SCHEMA, "SELECT * FROM n JOIN l ON n.c = l.c"),
         Vec::<&str>::new()
@@ -213,10 +218,6 @@ fn test_nvarchar_is_utf8mb3() {
         assert!(!mysql_codes_with(SCHEMA, sql).contains(&"E0036"), "{sql}");
     }
 
-    const UTF8MB3_SCHEMA: &str = "
-    CREATE TABLE a (c NVARCHAR(10)) DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci;
-    CREATE TABLE b (c VARCHAR(10) CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci);
-    ";
     assert_eq!(
         mysql_codes_with(UTF8MB3_SCHEMA, "SELECT 1 FROM a JOIN b ON a.c = b.c"),
         Vec::<&str>::new()
