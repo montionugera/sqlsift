@@ -64,7 +64,7 @@ pub struct Config {
     #[serde(default)]
     pub dbt_catalog: Option<String>,
 
-    /// Output format (human, json, sarif, github)
+    /// Output format (human, json, sarif, github, gitlab)
     #[serde(default)]
     pub format: Option<String>,
 

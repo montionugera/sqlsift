@@ -67,7 +67,8 @@ schema = [
 # target/catalog.json of the dbt project is used if it exists.
 # dbt_catalog = "target/catalog.json"
 
-# Output format: "human", "json", "sarif", or "github" (GitHub Actions annotations)
+# Output format: "human", "json", "sarif", "github" (GitHub Actions annotations)
+# or "gitlab" (GitLab Code Quality report)
 # format = "human"
 
 # Fail the check (exit 1) when more than this many warnings are reported.

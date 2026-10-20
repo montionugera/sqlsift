@@ -10,9 +10,6 @@ use sqlsift_core::{Diagnostic, DiagnosticKind, Severity};
 
 use crate::args::OutputFormat;
 
-/// Documentation anchor for diagnostic rules (used as SARIF `helpUri`)
-const RULES_HELP_URI: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "#diagnostic-rules");
-
 /// Diagnostics produced for a single file
 #[derive(Default)]
 pub struct FileDiagnostics {
@@ -94,6 +91,7 @@ impl OutputFormatter {
             OutputFormat::Json => print_json(&files, self.baseline),
             OutputFormat::Sarif => print_sarif(&files),
             OutputFormat::Github => print_github(&files),
+            OutputFormat::Gitlab => print_gitlab(&files),
         }
     }
 
@@ -401,12 +399,64 @@ fn escape_github_property(text: &str) -> String {
         .replace(',', "%2C")
 }
 
+/// Print diagnostics in GitLab Code Quality report format. GitLab matches
+/// `location.path` against the repository, so it should be run from the
+/// repository root; a leading `./` is dropped.
+fn print_gitlab(files: &[&FileDiagnostics]) {
+    let mut reports = Vec::new();
+    for f in files {
+        let path = gitlab_path(&f.file);
+        // Occurrences of each (rule, message) in the file, so that identical
+        // findings get distinct fingerprints (GitLab drops duplicates)
+        let mut seen: std::collections::HashMap<(&str, &str), usize> =
+            std::collections::HashMap::new();
+        for d in &f.diagnostics {
+            let n = seen.entry((d.code(), d.message.as_str())).or_default();
+            *n += 1;
+            let line = location(d, &f.source).map_or(1, |(l, _)| l);
+            let severity = match d.severity {
+                Severity::Error => "major",
+                Severity::Warning => "minor",
+                Severity::Info => "info",
+            };
+            let mut hash_data = Vec::new();
+            hash_data.extend_from_slice(path.as_bytes());
+            hash_data.push(b':');
+            hash_data.extend_from_slice(d.code().as_bytes());
+            hash_data.push(b':');
+            hash_data.extend_from_slice(d.message.as_bytes());
+            hash_data.push(b':');
+            hash_data.extend_from_slice(n.to_string().as_bytes());
+            let fingerprint = format!("{:016x}", sqlsift_core::baseline::fnv1a_64(&hash_data));
+
+            reports.push(serde_json::json!({
+                "description": d.message,
+                "check_name": d.code(),
+                "fingerprint": fingerprint,
+                "severity": severity,
+                "location": {
+                    "path": path,
+                    "lines": {
+                        "begin": line
+                    }
+                }
+            }));
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&reports).unwrap());
+}
+
+/// The report path of a file: `/` separators and no leading `./`
+fn gitlab_path(file: &str) -> String {
+    file.replace('\\', "/").trim_start_matches("./").to_string()
+}
+
 fn sarif_rule(kind: DiagnosticKind, description: &str) -> serde_json::Value {
     serde_json::json!({
         "id": kind.code(),
         "name": kind.name(),
         "shortDescription": { "text": description },
-        "helpUri": RULES_HELP_URI
+        "helpUri": kind.doc_url()
     })
 }
 

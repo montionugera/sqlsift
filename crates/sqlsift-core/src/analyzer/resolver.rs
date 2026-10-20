@@ -35,6 +35,7 @@ use super::scope::{
 };
 use super::structure::{is_aggregate, Clause};
 use super::suspicious::InSubquery;
+use super::type_check::located_span;
 use super::{Reference, ReferenceKind};
 
 /// Resolves names and checks types in SQL statements
@@ -169,7 +170,11 @@ impl<'a> Resolver<'a> {
     /// Resolve a statement. Returns its output columns (the result of a query, or
     /// the RETURNING list of INSERT/UPDATE/DELETE) if they can be determined.
     pub(super) fn statement(&mut self, stmt: &Statement) -> Option<Vec<Column>> {
-        if self.restrictions {
+        // The statement wrapped by EXPLAIN / PREPARE is checked when it is resolved
+        // below; checking the wrapper too would report its E0028 twice
+        if self.restrictions
+            && !matches!(stmt, Statement::Explain { .. } | Statement::Prepare { .. })
+        {
             self.check_restrictions(stmt);
         }
         match stmt {
@@ -215,6 +220,18 @@ impl<'a> Resolver<'a> {
             }
             Statement::CreateView(view) => {
                 self.query(&view.query, false);
+                None
+            }
+            Statement::Explain { statement, .. } | Statement::Prepare { statement, .. } => {
+                self.statement(statement);
+                None
+            }
+            Statement::Declare { stmts } => {
+                for declare in stmts {
+                    if let Some(query) = &declare.for_query {
+                        self.query(query, false);
+                    }
+                }
                 None
             }
             _ => None,
@@ -971,6 +988,13 @@ impl<'a> Resolver<'a> {
                 {
                     l.ty = r.ty;
                 }
+                // Branches of different collations: MySQL picks another one for the
+                // result (the charset's _bin collation, or an error), not tracked
+                if let (Some(lc), Some(rc)) = (&l.collation, &r.collation) {
+                    if !lc.eq_ignore_ascii_case(rc) {
+                        l.collation = None;
+                    }
+                }
             }
         }
         Some(left)
@@ -1173,6 +1197,8 @@ impl<'a> Resolver<'a> {
                     };
                     let mut column = Column::new(name, self.infer_expr_type(expr));
                     column.nullable = self.output_nullable(expr);
+                    column.character_set = self.infer_expr_charset(expr);
+                    column.collation = self.infer_expr_collation(expr);
                     columns.push(column);
                 }
                 // BigQuery `f(x).*`: the fields of a STRUCT, which aren't modeled
@@ -1190,6 +1216,8 @@ impl<'a> Resolver<'a> {
                     // Only a column reference is named the same in every dialect
                     column.guessed_name =
                         !matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_));
+                    column.character_set = self.infer_expr_charset(expr);
+                    column.collation = self.infer_expr_collation(expr);
                     columns.push(column);
                 }
                 SelectItem::Wildcard(options) => {
@@ -1382,12 +1410,44 @@ impl<'a> Resolver<'a> {
                     };
                     let in_right = right.is_empty() || right.iter().any(|(_, r)| has(r));
                     let in_left = left.iter().any(|(_, r)| has(r));
+                    let mut mix_args = None;
+                    if self.dialect == SqlDialect::MySQL {
+                        let left_col = left.iter().find_map(|(_, r)| {
+                            match r.column(&col.value, self.dialect) {
+                                ColumnMatch::Yes(c) => {
+                                    Some((c.collation.clone(), c.character_set.clone()))
+                                }
+                                _ => None,
+                            }
+                        });
+                        let right_col = right.iter().find_map(|(_, r)| {
+                            match r.column(&col.value, self.dialect) {
+                                ColumnMatch::Yes(c) => {
+                                    Some((c.collation.clone(), c.character_set.clone()))
+                                }
+                                _ => None,
+                            }
+                        });
+                        if let (Some((c1, cs1)), Some((c2, cs2))) = (left_col, right_col) {
+                            mix_args = Some((c1, cs1, c2, cs2));
+                        }
+                    }
                     let name = col.value.to_lowercase();
                     frame.using_columns.insert(name.clone());
                     if let Some(key) = &right_key {
                         if let Some(r) = frame.relations.get_mut(key) {
                             r.merged.insert(name);
                         }
+                    }
+                    if let Some((c1, cs1, c2, cs2)) = mix_args {
+                        self.check_collation_mix_raw(
+                            c1.as_deref(),
+                            cs1.as_deref(),
+                            c2.as_deref(),
+                            cs2.as_deref(),
+                            "=",
+                            Some(Span::from_sqlparser(&col.span)),
+                        );
                     }
                     if !(in_right && in_left) {
                         self.diagnostics.push(
@@ -2073,6 +2133,14 @@ impl<'a> Resolver<'a> {
                 if let Some(op) = operand {
                     self.expr(op);
                     self.check_case_when_null(op, conditions);
+                    for when in conditions {
+                        self.check_collation_mix(
+                            op,
+                            &when.condition,
+                            "CASE",
+                            located_span(op).or_else(|| located_span(&when.condition)),
+                        );
+                    }
                 }
                 for when in conditions {
                     self.expr(&when.condition);
@@ -2129,16 +2197,34 @@ impl<'a> Resolver<'a> {
                 self.expr(pattern);
                 self.check_like_operand(expr, "LIKE");
                 self.note_pattern_parameter(expr, pattern);
+                self.check_collation_mix(
+                    expr,
+                    pattern,
+                    "LIKE",
+                    located_span(expr).or_else(|| located_span(pattern)),
+                );
             }
             Expr::ILike { expr, pattern, .. } => {
                 self.expr(expr);
                 self.expr(pattern);
                 self.check_like_operand(expr, "ILIKE");
                 self.note_pattern_parameter(expr, pattern);
+                self.check_collation_mix(
+                    expr,
+                    pattern,
+                    "ILIKE",
+                    located_span(expr).or_else(|| located_span(pattern)),
+                );
             }
             Expr::SimilarTo { expr, pattern, .. } | Expr::RLike { expr, pattern, .. } => {
                 self.expr(expr);
                 self.expr(pattern);
+                self.check_collation_mix(
+                    expr,
+                    pattern,
+                    "RLIKE",
+                    located_span(expr).or_else(|| located_span(pattern)),
+                );
             }
             Expr::JsonAccess { value, .. } => self.expr(value),
             Expr::AnyOp { left, right, .. } | Expr::AllOp { left, right, .. } => {
@@ -2243,7 +2329,7 @@ impl<'a> Resolver<'a> {
             Expr::BinaryOp { left, op, right } if is_comparison_operator(op) => {
                 self.expr(left);
                 self.expr(right);
-                self.check_join_comparison(left, right);
+                self.check_join_comparison(left, op, right);
                 self.check_null_comparison(left, op, right);
                 self.check_self_comparison(left, op, right);
             }

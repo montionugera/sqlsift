@@ -1,14 +1,18 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use sqlsift_core::{SqlDialect, Templating};
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
-    CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams, Hover,
-    HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-    InitializedParams, MarkupContent, MarkupKind, MessageType, SaveOptions, ServerCapabilities,
+    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, CodeActionResponse, CompletionOptions, CompletionParams,
+    CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, Hover, HoverContents, HoverParams,
+    HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, MarkupContent,
+    MarkupKind, MessageType, NumberOrString, Position, Range, SaveOptions, ServerCapabilities,
     TextDocumentItem, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, Url,
+    TextDocumentSyncSaveOptions, TextEdit, Url, WorkspaceEdit,
 };
 use tower_lsp::{Client, LanguageServer};
 
@@ -83,6 +87,7 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![".".to_string(), " ".to_string()]),
                     ..Default::default()
                 }),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -243,6 +248,212 @@ impl LanguageServer for Backend {
             Ok(Some(CompletionResponse::Array(items)))
         }
     }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = &params.text_document.uri;
+        let state = self.state.read().await;
+        if state.is_embedded_sql_document(uri) {
+            return Ok(None);
+        }
+        let Some(text) = state.open_documents.get(uri) else {
+            return Ok(None);
+        };
+
+        let has_bom = text.starts_with('\u{feff}');
+        let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        let jinja = state.document_templating(uri) == Templating::Jinja;
+        let mut actions = Vec::new();
+        let mut seen_lines = HashSet::new();
+        let mut seen_files = HashSet::new();
+
+        for diag in &params.context.diagnostics {
+            if diag.source.as_deref() != Some("sqlsift") {
+                continue;
+            }
+            let Some(code) = (match &diag.code {
+                Some(NumberOrString::String(s)) => Some(s.as_str()),
+                _ => None,
+            }) else {
+                continue;
+            };
+
+            let line_idx = diag.range.start.line as usize;
+            let line_text = text.lines().nth(line_idx).unwrap_or("");
+            let clean_line = line_text.strip_prefix('\u{feff}').unwrap_or(line_text);
+            let indent: String = clean_line
+                .chars()
+                .take_while(|c| *c == ' ' || *c == '\t')
+                .collect();
+
+            // Disable for this line (omitted if line starts inside a multi-line string literal)
+            if seen_lines.insert((code.to_string(), line_idx))
+                && !line_starts_in_string(text, line_idx, state.dialect, jinja)
+            {
+                let start_char = u32::from(line_idx == 0 && has_bom);
+                let line_text_edit = TextEdit {
+                    range: Range::new(
+                        Position::new(diag.range.start.line, start_char),
+                        Position::new(diag.range.start.line, start_char),
+                    ),
+                    new_text: format!("{indent}-- sqlsift:disable {code}{newline}"),
+                };
+                let mut line_changes = HashMap::new();
+                line_changes.insert(uri.clone(), vec![line_text_edit]);
+
+                let line_action = CodeAction {
+                    title: format!("Disable {code} for this line"),
+                    kind: Some(CodeActionKind::QUICKFIX),
+                    diagnostics: Some(vec![diag.clone()]),
+                    edit: Some(WorkspaceEdit {
+                        changes: Some(line_changes),
+                        ..Default::default()
+                    }),
+                    is_preferred: Some(true),
+                    ..Default::default()
+                };
+                actions.push(CodeActionOrCommand::CodeAction(line_action));
+            }
+
+            // Disable for this file
+            if !seen_files.insert(code.to_string()) {
+                continue;
+            }
+            let file_char = u32::from(has_bom);
+            let file_text_edit = TextEdit {
+                range: Range::new(Position::new(0, file_char), Position::new(0, file_char)),
+                new_text: format!("-- sqlsift:disable-file {code}{newline}"),
+            };
+            let mut file_changes = HashMap::new();
+            file_changes.insert(uri.clone(), vec![file_text_edit]);
+
+            let file_action = CodeAction {
+                title: format!("Disable {code} for this file"),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![diag.clone()]),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(file_changes),
+                    ..Default::default()
+                }),
+                is_preferred: Some(false),
+                ..Default::default()
+            };
+            actions.push(CodeActionOrCommand::CodeAction(file_action));
+        }
+
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(actions))
+        }
+    }
+}
+
+/// Whether line `line_idx` (0-indexed) starts inside a multi-line string literal.
+///
+/// Backslash escapes only in `E'...'` strings and in MySQL, where `"..."` is a
+/// string too and `#` starts a comment; `jinja` skips `{# ... #}` comments.
+fn line_starts_in_string(text: &str, line_idx: usize, dialect: SqlDialect, jinja: bool) -> bool {
+    if line_idx == 0 {
+        return false;
+    }
+
+    let mut target_offset = 0;
+    let mut current_line = 0;
+    for (i, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            current_line += 1;
+            if current_line == line_idx {
+                target_offset = i + 1;
+                break;
+            }
+        }
+    }
+    if current_line < line_idx {
+        return false;
+    }
+
+    let mysql = dialect == SqlDialect::MySQL;
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < text.len() {
+        if i >= target_offset {
+            return false;
+        }
+        let rest = &text[i..];
+        if rest.starts_with("--") || (mysql && rest.starts_with('#')) {
+            i += rest.find('\n').map_or(rest.len(), |n| n + 1);
+        } else if let Some(body) = rest.strip_prefix("/*") {
+            i += body.find("*/").map_or(rest.len(), |n| n + 4);
+        } else if let Some(body) = rest.strip_prefix("{#").filter(|_| jinja) {
+            i += body.find("#}").map_or(rest.len(), |n| n + 4);
+        } else if rest.starts_with('\'') || (mysql && rest.starts_with('"')) {
+            let e_prefix = i > 0
+                && matches!(bytes[i - 1], b'e' | b'E')
+                && (i == 1 || !is_ident_char(bytes[i - 2]));
+            let end = end_of_quoted(bytes, i, mysql || e_prefix);
+            if i < target_offset && target_offset < end {
+                return true;
+            }
+            i = end;
+        } else if let Some(end) = end_of_dollar_quoted(text, i) {
+            if i < target_offset && target_offset < end {
+                return true;
+            }
+            i = end;
+        } else if rest.starts_with('"') || rest.starts_with('`') {
+            i = end_of_quoted(bytes, i, false);
+        } else {
+            let c = rest.chars().next().unwrap();
+            i += c.len_utf8();
+        }
+    }
+    false
+}
+
+/// End of the quoted string or identifier starting at `start` (its quote
+/// doubled inside it, and `\` escaping the next byte when `backslash`)
+fn end_of_quoted(bytes: &[u8], start: usize, backslash: bool) -> usize {
+    let quote = bytes[start];
+    let mut j = start + 1;
+    while j < bytes.len() {
+        if backslash && bytes[j] == b'\\' {
+            j += 2;
+        } else if bytes[j] == quote {
+            if bytes.get(j + 1) != Some(&quote) {
+                return j + 1;
+            }
+            j += 2;
+        } else {
+            j += 1;
+        }
+    }
+    bytes.len()
+}
+
+/// End of the dollar-quoted string (`$$...$$`, `$tag$...$tag$`) starting at
+/// `start`, or `None` if there is none there (e.g. a `$1` parameter)
+fn end_of_dollar_quoted(sql: &str, start: usize) -> Option<usize> {
+    let rest = sql.get(start..)?;
+    if !rest.starts_with('$') {
+        return None;
+    }
+    let tag_len = rest[1..]
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        .count();
+    let tag_body = &rest[1..=tag_len];
+    if tag_body.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        || !rest[1 + tag_len..].starts_with('$')
+    {
+        return None;
+    }
+    let delimiter = &rest[..tag_len + 2];
+    let body_start = start + delimiter.len();
+    Some(
+        sql[body_start..]
+            .find(delimiter)
+            .map_or(sql.len(), |n| body_start + n + delimiter.len()),
+    )
 }
 
 /// Extract the SQL identifier at the given line/character position
@@ -315,5 +526,76 @@ mod tests {
     fn test_word_at_position_underscore() {
         let text = "SELECT user_name FROM users";
         assert_eq!(word_at_position(text, 0, 10), Some("user_name".to_string()));
+    }
+
+    fn in_string(text: &str, line_idx: usize) -> bool {
+        line_starts_in_string(text, line_idx, SqlDialect::PostgreSQL, false)
+    }
+
+    #[test]
+    fn test_line_starts_in_string() {
+        let text = "SELECT 'a\nb', nme FROM users;";
+        assert!(!in_string(text, 0));
+        assert!(in_string(text, 1));
+
+        let text2 = "SELECT 'hello' AS greeting,\n       nme FROM users;";
+        assert!(!in_string(text2, 0));
+        assert!(!in_string(text2, 1));
+
+        let text3 = "-- comment with 'quote\nSELECT nme FROM users;";
+        assert!(!in_string(text3, 0));
+        assert!(!in_string(text3, 1));
+
+        let text4 = "SELECT $$multi\nline$$ AS doc,\n       nme FROM users;";
+        assert!(in_string(text4, 1));
+        assert!(!in_string(text4, 2));
+    }
+
+    #[test]
+    fn test_line_starts_in_string_backslash_is_literal_in_standard_strings() {
+        // 'C:\' ends at its second quote, so 'x\n...' is open at the line break
+        let text = "SELECT 'C:\\', 'x\\n\nnme', nme FROM users;";
+        assert!(in_string(text, 1));
+        let text = "SELECT 'C:\\', nme,\n  nme FROM users;";
+        assert!(!in_string(text, 1));
+    }
+
+    #[test]
+    fn test_line_starts_in_string_backslash_escapes_in_e_strings() {
+        let text = "SELECT E'it\\'s', nme,\n  nme FROM users;";
+        assert!(!in_string(text, 1));
+        let text = "SELECT e'it\\'s\nx', nme FROM users;";
+        assert!(in_string(text, 1));
+        // `name'...'` is not an E string
+        let text = "SELECT name'C:\\', nme,\n  nme FROM users;";
+        assert!(!in_string(text, 1));
+    }
+
+    #[test]
+    fn test_line_starts_in_string_mysql() {
+        let mysql = |text, line| line_starts_in_string(text, line, SqlDialect::MySQL, false);
+        // Backslash escapes in MySQL strings
+        assert!(!mysql("SELECT 'it\\'s', nme,\n  nme FROM users;", 1));
+        // "..." is a string in MySQL, an identifier in PostgreSQL
+        let text = "SELECT \"a\\\nb\", nme FROM users;";
+        assert!(mysql(text, 1));
+        assert!(mysql("SELECT \"a\nb\", nme FROM users;", 1));
+        assert!(!in_string("SELECT \"a\nb\", nme FROM users;", 1));
+        // # starts a comment in MySQL
+        let text = "# don't\nSELECT nme\nFROM users;";
+        assert!(!mysql(text, 1));
+        assert!(!mysql(text, 2));
+    }
+
+    #[test]
+    fn test_line_starts_in_string_jinja_comment() {
+        let jinja = |text, line| line_starts_in_string(text, line, SqlDialect::PostgreSQL, true);
+        let text = "{# don't #}\nSELECT nme\nFROM users;";
+        assert!(!jinja(text, 1));
+        assert!(!jinja(text, 2));
+        let text = "{# multi\nline don't #}\nSELECT nme FROM users;";
+        assert!(!jinja(text, 2));
+        // Without Jinja templating the apostrophe opens a string
+        assert!(in_string("{# don't #}\nSELECT nme\nFROM users;", 1));
     }
 }

@@ -394,6 +394,13 @@ pub const RULES: &[Rule] = &[
         summary: "Duplicate primary key or unique values in an INSERT VALUES list",
     },
     Rule {
+        kind: DiagnosticKind::IllegalMixOfCollations,
+        code: "E0036",
+        name: "illegal-mix-of-collations",
+        category: RuleCategory::Correctness,
+        summary: "Comparison or set operation combines incompatible collations in MySQL",
+    },
+    Rule {
         kind: DiagnosticKind::CheckConstraintViolation,
         code: "E0037",
         name: "check-constraint-violation",
@@ -414,6 +421,25 @@ impl DiagnosticKind {
     pub fn rule(&self) -> &'static Rule {
         &RULES[*self as usize]
     }
+
+    /// URL of this rule's page in the user guide
+    pub fn doc_url(&self) -> String {
+        rule_doc_url(self.code())
+    }
+}
+
+/// Documentation URL for a rule's page in the user guide
+///
+/// ```
+/// use sqlsift_core::rules::rule_doc_url;
+///
+/// assert_eq!(
+///     rule_doc_url("E0002"),
+///     "https://sqlsift.dev/docs/rules/E0002.html"
+/// );
+/// ```
+pub fn rule_doc_url(code: &str) -> String {
+    format!("https://sqlsift.dev/docs/rules/{code}.html")
 }
 
 /// Look up a rule by code (`E0002`) or name (`column-not-found`), ignoring case

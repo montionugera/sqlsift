@@ -191,3 +191,24 @@ jobs:
         with:
           sarif_file: results.sarif
 ```
+
+## GitLab CI (Code Quality)
+
+GitLab shows findings on merge request diffs when a job uploads a report in Code Quality format:
+
+```yaml
+# .gitlab-ci.yml
+sqlsift:
+  stage: test
+  image: rust:latest
+  script:
+    - cargo install sqlsift-cli
+    - sqlsift check --format gitlab --schema db/schema.sql 'queries/**/*.sql' > gl-code-quality-report.json
+  artifacts:
+    reports:
+      codequality: gl-code-quality-report.json
+    when: always
+```
+
+`when: always` uploads the report even when `sqlsift check` finds errors and exits non-zero. Run sqlsift from the repository root (the default working directory of a job) with relative paths: GitLab matches the report paths against the repository.
+

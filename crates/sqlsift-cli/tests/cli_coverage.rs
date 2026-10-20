@@ -2249,9 +2249,9 @@ fn sarif_rules_describe_every_result_rule() {
         assert!(rule["shortDescription"]["text"]
             .as_str()
             .is_some_and(|s| !s.is_empty()));
-        assert!(rule["helpUri"]
-            .as_str()
-            .is_some_and(|s| s.starts_with("https://")));
+        let id = rule["id"].as_str().expect("rule id");
+        let expected_url = format!("https://sqlsift.dev/docs/rules/{id}.html");
+        assert_eq!(rule["helpUri"].as_str(), Some(expected_url.as_str()));
     }
     let results = v["runs"][0]["results"].as_array().unwrap();
     assert!(!results.is_empty());
@@ -2725,6 +2725,132 @@ fn github_format_from_config() {
 }
 
 // ---------------------------------------------------------------------------
+// GitLab Code Quality report (#252)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gitlab_format_prints_valid_code_quality_report() {
+    let t = with_users_schema("gitlab");
+    t.write(
+        "sql/q.sql",
+        "SELECT nme FROM users;\nSELECT id FROM users WHERE id = 'x';\n",
+    );
+    let run = t.run(&["check", "-s", "schema.sql", "-f", "gitlab", "sql/q.sql"]);
+    run.assert_code(1)
+        .assert_stderr_contains("Found 2 error(s)");
+    let v: Value = serde_json::from_str(&run.stdout).expect("valid JSON array");
+    let items = v.as_array().expect("array of issues");
+    assert_eq!(items.len(), 2);
+
+    let first = &items[0];
+    assert!(first["description"]
+        .as_str()
+        .unwrap()
+        .contains("Column 'nme' not found"));
+    assert_eq!(first["check_name"], "E0002");
+    assert_eq!(first["severity"], "major");
+    assert_eq!(first["location"]["path"], "sql/q.sql");
+    assert_eq!(first["location"]["lines"]["begin"], 1);
+    assert!(first["fingerprint"].as_str().is_some_and(|s| s.len() == 16));
+
+    let second = &items[1];
+    assert_eq!(second["check_name"], "E0003");
+    assert_eq!(second["severity"], "major");
+    assert_eq!(second["location"]["path"], "sql/q.sql");
+    assert_eq!(second["location"]["lines"]["begin"], 2);
+}
+
+#[test]
+fn gitlab_format_reports_warnings_as_minor() {
+    let t = with_users_schema("gitlab-warn");
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    let run = t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "-f",
+        "gitlab",
+        "-W",
+        "E0002",
+        "q.sql",
+    ]);
+    run.assert_code(0);
+    let v: Value = serde_json::from_str(&run.stdout).expect("valid JSON array");
+    assert_eq!(v[0]["severity"], "minor");
+}
+
+#[test]
+fn gitlab_format_fingerprint_is_stable_across_line_moves_and_runs() {
+    let t = with_users_schema("gitlab-fp");
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    let run1 = t.run(&["check", "-s", "schema.sql", "-f", "gitlab", "q.sql"]);
+    run1.assert_code(1);
+    let v1: Value = serde_json::from_str(&run1.stdout).expect("valid JSON");
+    let fp1 = v1[0]["fingerprint"].as_str().unwrap().to_string();
+
+    // Move query to line 4
+    t.write("q.sql", "\n\n\nSELECT nme FROM users;\n");
+    let run2 = t.run(&["check", "-s", "schema.sql", "-f", "gitlab", "q.sql"]);
+    run2.assert_code(1);
+    let v2: Value = serde_json::from_str(&run2.stdout).expect("valid JSON");
+    let fp2 = v2[0]["fingerprint"].as_str().unwrap().to_string();
+
+    assert_eq!(v2[0]["location"]["lines"]["begin"], 4);
+    assert_eq!(fp1, fp2, "fingerprint must be stable across line moves");
+}
+
+#[test]
+fn gitlab_format_fingerprints_differ_for_identical_findings() {
+    let t = with_users_schema("gitlab-dup");
+    t.write("q.sql", "SELECT nme FROM users;\nSELECT nme FROM users;\n");
+    let run = t.run(&["check", "-s", "schema.sql", "-f", "gitlab", "q.sql"]);
+    run.assert_code(1);
+    let v: Value = serde_json::from_str(&run.stdout).expect("valid JSON");
+    assert_eq!(v.as_array().unwrap().len(), 2);
+    assert_eq!(v[0]["description"], v[1]["description"]);
+    assert_ne!(
+        v[0]["fingerprint"], v[1]["fingerprint"],
+        "GitLab drops issues with the same fingerprint"
+    );
+}
+
+#[test]
+fn gitlab_format_strips_leading_dot_slash_from_path() {
+    let t = with_users_schema("gitlab-dotslash");
+    t.write("sql/q.sql", "SELECT nme FROM users;\n");
+    let plain = t.run(&["check", "-s", "schema.sql", "-f", "gitlab", "sql/q.sql"]);
+    let dotted = t.run(&["check", "-s", "schema.sql", "-f", "gitlab", "./sql/q.sql"]);
+    let plain: Value = serde_json::from_str(&plain.stdout).expect("valid JSON");
+    let dotted: Value = serde_json::from_str(&dotted.stdout).expect("valid JSON");
+    assert_eq!(dotted[0]["location"]["path"], "sql/q.sql");
+    assert_eq!(plain[0]["fingerprint"], dotted[0]["fingerprint"]);
+}
+
+#[test]
+fn gitlab_format_with_no_diagnostics_prints_empty_array() {
+    let t = with_users_schema("gitlab-clean");
+    t.write("q.sql", "SELECT id FROM users;\n");
+    let run = t.run(&["check", "-s", "schema.sql", "-f", "gitlab", "q.sql"]);
+    run.assert_code(0);
+    let v: Value = serde_json::from_str(&run.stdout).expect("valid JSON");
+    assert_eq!(v, serde_json::json!([]));
+}
+
+#[test]
+fn gitlab_format_from_config() {
+    let t = with_users_schema("gitlab-cfg");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nformat = \"gitlab\"\n",
+    );
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    let run = t.run(&["check", "q.sql"]);
+    run.assert_code(1);
+    let v: Value = serde_json::from_str(&run.stdout).expect("valid JSON");
+    assert_eq!(v[0]["check_name"], "E0002");
+}
+
+// ---------------------------------------------------------------------------
 // --max-warnings (#93)
 // ---------------------------------------------------------------------------
 
@@ -3123,18 +3249,104 @@ fn fixed_baseline_entries_are_a_note_not_a_failure() {
     t.run(&["check", "-s", "schema.sql", "--write-baseline", "q.sql"])
         .assert_code(0);
     t.write("q.sql", "SELECT name FROM users;\nSELECT id FROM userz;\n");
-    t.run(&[
+    let without_v = t.run(&[
         "check",
         "-s",
         "schema.sql",
         "--baseline",
         "sqlsift-baseline.json",
         "q.sql",
-    ])
-    .assert_code(0)
-    .assert_stderr_contains(
+    ]);
+    without_v.assert_code(0).assert_stderr_contains(
         "Note: 1 baseline entry no longer occurs; re-run with --prune-baseline to remove it",
     );
+    assert!(!without_v.stderr.contains("E0002"));
+
+    let with_v = t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "sqlsift-baseline.json",
+        "q.sql",
+        "-v",
+    ]);
+    with_v
+        .assert_code(0)
+        .assert_stderr_contains(
+            "Note: 1 baseline entry no longer occurs; re-run with --prune-baseline to remove it",
+        )
+        .assert_stderr_contains("  q.sql E0002");
+}
+
+#[test]
+fn fixed_baseline_entries_with_verbose_shows_line_when_known() {
+    let t = with_users_schema("bl-stale-line");
+    t.write("q.sql", "SELECT id FROM users;\nSELECT name FROM users;\n");
+    let json = r#"{"version": 1, "entries": [
+        {"file": "q.sql", "code": "E0002", "statement_hash": "abc", "occurrence": 0, "line": 2, "message": "Column 'name' not found"}
+    ]}"#;
+    t.write("sqlsift-baseline.json", json);
+    let run = t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "sqlsift-baseline.json",
+        "q.sql",
+        "-v",
+    ]);
+    run.assert_code(0)
+        .assert_stderr_contains(
+            "Note: 1 baseline entry no longer occurs; re-run with --prune-baseline to remove it",
+        )
+        .assert_stderr_contains("  q.sql:2 E0002 Column 'name' not found");
+}
+
+#[test]
+fn stale_entries_with_verbose_list_each_statement_line_and_message() {
+    let t = with_users_schema("bl-stale-repeat");
+    t.write(
+        "a.sql",
+        "SELECT nme FROM users;\n-- comment before\n\nSELECT foo FROM users;\nSELECT nme FROM users;\n",
+    );
+    write_baseline(&t, &["a.sql"]).assert_code(0);
+    t.write(
+        "schema.sql",
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, nme TEXT, foo TEXT);\n",
+    );
+    let args = [
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "sqlsift-baseline.json",
+        "a.sql",
+        "-v",
+    ];
+    let run = t.run(&args);
+    run.assert_code(0)
+        .assert_stderr_contains("Note: 3 baseline entries no longer occur");
+    let listed: Vec<_> = run
+        .stderr
+        .lines()
+        .filter(|line| line.starts_with("  a.sql"))
+        .collect();
+    assert_eq!(listed.len(), 3, "{}", run.stderr);
+    assert!(listed[0].starts_with("  a.sql:1 E0002 "), "{}", run.stderr);
+    assert!(listed[0].contains("nme"), "{}", run.stderr);
+    assert!(listed[1].starts_with("  a.sql:4 E0002 "), "{}", run.stderr);
+    assert!(listed[1].contains("foo"), "{}", run.stderr);
+    assert!(listed[2].starts_with("  a.sql:5 E0002 "), "{}", run.stderr);
+    assert!(listed[2].contains("nme"), "{}", run.stderr);
+
+    // --strict-baseline lists them the same way
+    let mut strict = args.to_vec();
+    strict.push("--strict-baseline");
+    t.run(&strict)
+        .assert_code(1)
+        .assert_stderr_contains("Error: 3 baseline entries no longer occur")
+        .assert_stderr_contains(listed[1]);
 }
 
 #[test]

@@ -779,6 +779,12 @@ pub struct TableDef {
     /// UPDATE may set NOT NULL columns to NULL
     #[serde(default)]
     pub before_update_trigger: bool,
+    /// Default character set (e.g. MySQL `DEFAULT CHARSET = utf8mb4`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_set: Option<String>,
+    /// Default collation (e.g. MySQL `DEFAULT COLLATE = utf8mb4_unicode_ci`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collation: Option<String>,
     /// Whether this table was created with STRICT typing (SQLite STRICT tables)
     #[serde(default)]
     pub strict: bool,
@@ -813,9 +819,23 @@ impl TableDef {
             unknown_unique_keys: false,
             before_insert_trigger: false,
             before_update_trigger: false,
+            character_set: None,
+            collation: None,
             strict: false,
             partition_of: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_character_set(mut self, character_set: impl Into<String>) -> Self {
+        self.character_set = Some(character_set.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_collation(mut self, collation: impl Into<String>) -> Self {
+        self.collation = Some(collation.into());
+        self
     }
 
     /// The renamed or dropped column that was called `name`, if any
@@ -936,6 +956,12 @@ pub struct ColumnDef {
     /// Whether the column has an explicit `COLLATE` clause
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub collated: bool,
+    /// Character set for text columns (e.g. `CHARACTER SET utf8mb4`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_set: Option<String>,
+    /// Collation for text columns (e.g. `COLLATE utf8mb4_unicode_ci`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collation: Option<String>,
 }
 
 impl ColumnDef {
@@ -951,6 +977,8 @@ impl ColumnDef {
             generated: false,
             case_sensitive: false,
             collated: false,
+            character_set: None,
+            collation: None,
         }
     }
 
@@ -970,6 +998,18 @@ impl ColumnDef {
     pub fn primary_key(mut self) -> Self {
         self.is_primary_key = true;
         self.nullable = false;
+        self
+    }
+
+    #[must_use]
+    pub fn with_character_set(mut self, character_set: impl Into<String>) -> Self {
+        self.character_set = Some(character_set.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_collation(mut self, collation: impl Into<String>) -> Self {
+        self.collation = Some(collation.into());
         self
     }
 }
