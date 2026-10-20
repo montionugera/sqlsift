@@ -553,3 +553,59 @@ fn drop_constraint_fallback_and_partition_parent_drop() {
         Vec::<&str>::new()
     );
 }
+
+#[test]
+fn unnamed_check_definition_order_ambiguity() {
+    // PostgreSQL: when multiple unnamed CHECKs would share a generated name,
+    // neither is assigned that name so the drop-all fallback covers DROP CONSTRAINT.
+    let pg_schema = "
+    CREATE TABLE t (y int, CHECK (x < 100), x int CHECK (x > 0));
+    ALTER TABLE t DROP CONSTRAINT t_x_check;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            pg_schema,
+            "INSERT INTO t (x) VALUES (150)"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // MySQL: multiple unnamed CHECKs also leave generated_name empty so
+    // DROP CHECK t_chk_1 triggers the drop-all fallback.
+    let mysql_schema = "
+    CREATE TABLE t (y int, CHECK (x < 100), x int CHECK (x > 0));
+    ALTER TABLE t DROP CHECK t_chk_1;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::MySQL,
+            mysql_schema,
+            "INSERT INTO t (x) VALUES (150)"
+        ),
+        Vec::<&str>::new()
+    );
+
+    // When unnamed CHECKs have distinct generated names, only the dropped one
+    // is removed and the remaining one continues to be enforced.
+    let distinct_pg_schema = "
+    CREATE TABLE t (x INT CHECK (x > 0), y INT CHECK (y > 0));
+    ALTER TABLE t DROP CONSTRAINT t_x_check;
+    ";
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            distinct_pg_schema,
+            "INSERT INTO t (x, y) VALUES (-1, 5)"
+        ),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        codes_with_schema(
+            SqlDialect::PostgreSQL,
+            distinct_pg_schema,
+            "INSERT INTO t (x, y) VALUES (1, -5)"
+        ),
+        vec!["E0037"]
+    );
+}

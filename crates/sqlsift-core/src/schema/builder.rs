@@ -1057,6 +1057,8 @@ impl SchemaBuilder {
             self.process_table_constraint(&mut table, constraint);
         }
 
+        assign_generated_check_names(&mut table, self.dialect);
+
         // `CREATE TABLE p1 PARTITION OF p ...`: the parent's columns
         if let Some(parent) = &create.partition_of {
             self.add_partition(table, parent);
@@ -1458,10 +1460,9 @@ impl SchemaBuilder {
                     }
                 }
                 AlterTableOperation::DropConstraint { name, .. } => {
-                    let dialect = self.dialect;
                     for target in self.catalog.table_and_partitions(&table_name) {
                         if let Some(table) = self.catalog.get_table_mut(&target) {
-                            drop_table_constraint(table, &name.value, dialect);
+                            drop_table_constraint(table, &name.value);
                         }
                     }
                 }
@@ -1557,23 +1558,12 @@ impl SchemaBuilder {
             TableConstraint::Check(check) => {
                 let name = check.name.as_ref().map(|n| n.value.clone());
                 let expression = check.expr.to_string();
-                let generated_name = if name.is_none() {
-                    generated_check_name(
-                        self.dialect,
-                        &table.name.name,
-                        None,
-                        &expression,
-                        &table.check_constraints,
-                    )
-                } else {
-                    None
-                };
                 let check = CheckConstraintDef {
                     name,
                     expression,
                     enforced: check.enforced.unwrap_or(true),
                     column: None,
-                    generated_name,
+                    generated_name: None,
                 };
                 table.check_constraints.push(check);
             }
@@ -1795,40 +1785,15 @@ fn copy_check_constraints(
     checks: Vec<CheckConstraintDef>,
     dialect: SqlDialect,
 ) {
-    for mut check in checks {
-        if check.name.is_none() && check.generated_name.is_none() {
-            check.generated_name = generated_check_name(
-                dialect,
-                &table.name.name,
-                check.column.as_deref(),
-                &check.expression,
-                &table.check_constraints,
-            );
-        }
+    for check in checks {
         table.check_constraints.push(check);
     }
+    assign_generated_check_names(table, dialect);
 }
 
-fn generated_check_name(
-    dialect: SqlDialect,
-    table_name: &str,
-    _col_name: Option<&str>,
-    expression: &str,
-    existing: &[CheckConstraintDef],
-) -> Option<String> {
-    let is_taken = |candidate: &str| {
-        existing.iter().any(|c| {
-            c.name
-                .as_deref()
-                .is_some_and(|n| n.eq_ignore_ascii_case(candidate))
-                || c.generated_name
-                    .as_deref()
-                    .is_some_and(|n| n.eq_ignore_ascii_case(candidate))
-        })
-    };
+fn generated_check_name(dialect: SqlDialect, table_name: &str, expression: &str) -> Option<String> {
     if dialect == SqlDialect::MySQL {
-        let candidate = format!("{table_name}_chk_1");
-        (!is_taken(&candidate)).then_some(candidate)
+        Some(format!("{table_name}_chk_1"))
     } else if dialect.is_psql() {
         let inferred_col = Parser::new(dialect.parser_dialect().as_ref())
             .try_with_sql(expression)
@@ -1839,13 +1804,93 @@ fn generated_check_name(
                 analyzer::ranges::collect_referenced_columns(&expr, &mut cols);
                 (cols.len() == 1).then(|| cols.into_iter().next()).flatten()
             });
-        let base = match inferred_col.as_deref() {
+        Some(match inferred_col.as_deref() {
             Some(col) => format!("{table_name}_{col}_check"),
             None => format!("{table_name}_check"),
-        };
-        (!is_taken(&base)).then_some(base)
+        })
     } else {
         None
+    }
+}
+
+/// Assign guessed names to unnamed CHECK constraints.
+///
+/// Gives an unnamed CHECK a guessed name only when no other unnamed CHECK of the
+/// table would get the same name (for MySQL, only when there is exactly one
+/// unnamed CHECK). Otherwise leaves it unnamed so the drop-all fallback covers
+/// DROP CONSTRAINT / DROP CHECK without false positives.
+fn assign_generated_check_names(table: &mut TableDef, dialect: SqlDialect) {
+    let unnamed_indices: Vec<usize> = table
+        .check_constraints
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            c.name.is_none()
+                && (c.generated_name.is_none()
+                    || c.generated_name
+                        .as_ref()
+                        .is_some_and(|g| g.starts_with(&format!("{}_", table.name.name))))
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    if dialect == SqlDialect::MySQL {
+        if unnamed_indices.len() == 1 {
+            let candidate = format!("{}_chk_1", table.name.name);
+            let is_taken = table.check_constraints.iter().enumerate().any(|(j, c)| {
+                j != unnamed_indices[0]
+                    && (c
+                        .name
+                        .as_deref()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(&candidate))
+                        || c.generated_name
+                            .as_deref()
+                            .is_some_and(|n| n.eq_ignore_ascii_case(&candidate)))
+            });
+            table.check_constraints[unnamed_indices[0]].generated_name =
+                (!is_taken).then_some(candidate);
+        } else {
+            for &idx in &unnamed_indices {
+                table.check_constraints[idx].generated_name = None;
+            }
+        }
+    } else if dialect.is_psql() {
+        let candidates: Vec<Option<String>> = unnamed_indices
+            .iter()
+            .map(|&i| {
+                generated_check_name(
+                    dialect,
+                    &table.name.name,
+                    &table.check_constraints[i].expression,
+                )
+            })
+            .collect();
+
+        let mut counts = std::collections::HashMap::new();
+        for cand in candidates.iter().flatten() {
+            *counts.entry(cand.to_ascii_lowercase()).or_insert(0usize) += 1;
+        }
+
+        for (&idx, cand) in unnamed_indices.iter().zip(candidates) {
+            table.check_constraints[idx].generated_name = cand.and_then(|name| {
+                let unique = counts.get(&name.to_ascii_lowercase()) == Some(&1);
+                let is_taken = table.check_constraints.iter().enumerate().any(|(j, c)| {
+                    j != idx
+                        && (c
+                            .name
+                            .as_deref()
+                            .is_some_and(|n| n.eq_ignore_ascii_case(&name))
+                            || c.generated_name
+                                .as_deref()
+                                .is_some_and(|n| n.eq_ignore_ascii_case(&name)))
+                });
+                (unique && !is_taken).then_some(name)
+            });
+        }
+    } else {
+        for &idx in &unnamed_indices {
+            table.check_constraints[idx].generated_name = None;
+        }
     }
 }
 
@@ -1943,7 +1988,7 @@ fn rename_table_constraint(
     }
 }
 
-fn drop_table_constraint(table: &mut TableDef, target: &str, _dialect: SqlDialect) {
+fn drop_table_constraint(table: &mut TableDef, target: &str) {
     let before_checks = table.check_constraints.len();
     table
         .check_constraints
@@ -2325,6 +2370,9 @@ fn mask_table_elements(
                     drop[significant[n + 4]] = true;
                 }
             } else if dialect.is_psql() && in_alter_column_type && word(n) == "COLLATE" {
+                // sqlparser does not support PostgreSQL's `ALTER COLUMN c TYPE <type> COLLATE <coll>`
+                // clause. Rewrite COLLATE into a synthetic `USING __sqlsift_collate` expression so the
+                // statement parses cleanly and `apply_alter_column` can record that the column is collated.
                 let rest_tokens: Vec<&Token> = significant[n + 1..]
                     .iter()
                     .map(|&i| &tokens[i].token)
